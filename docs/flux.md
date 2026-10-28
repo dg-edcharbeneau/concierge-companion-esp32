@@ -4,8 +4,13 @@ Why the Flux stack works on this board, and what differs from v1.
 
 ## Speech stack: Flux
 
-The build is Flux-only: `flux-general-en` STT with model-integrated end-of-turn
-detection, and Flux TTS (`CONFIG_DEEPGRAM_FLUX_VOICE`, default `flux-kit-en`).
+The build is Flux-only: Flux STT with model-integrated end-of-turn detection,
+and Flux TTS (`CONFIG_DEEPGRAM_FLUX_VOICE`, default `flux-kit-en`). STT is
+`flux-general-en` for an English voice and `flux-general-multi` for any other
+except Japanese, which hears far better on Nova-3 (`version: "v1"`,
+`language: "ja"`) and pays for it in barge-in latency. The voice implies the
+language — see
+[voice-commands.md](voice-commands.md#the-voice-implies-the-language).
 
 A `menuconfig` choice used to offer Nova-3 + Aura as a fallback, and it was
 removed because it could not be selected — `CONFIG_DEEPGRAM_FLUX_VOICE` was
@@ -40,9 +45,11 @@ one.
 ### Two things that differ from v1
 
 - **No `agent.language` on the Flux path.** `language` is a v1 listen-provider
-  option; Flux uses `language_hints`, and `flux-general-en` implies English. If
-  `SettingsApplied` ever stops arriving after a Settings change, this is the
-  first thing to check.
+  option; Flux uses `language_hints`. `flux-general-en` implies English and
+  takes none; a non-English voice sends `flux-general-multi` with
+  `language_hints: [lang, "en"]`. A hint on any other model, or a code
+  `flux-general-multi` does not support, is a 400. If `SettingsApplied` ever
+  stops arriving after a Settings change, this is the first thing to check.
 - **Turn events stay internal.** Flux's `TurnInfo` / `StartOfTurn` /
   `EndOfTurn` belong to `/v2/listen`. Inside the Agent API they are consumed by
   the orchestrator and are *not* surfaced to the client, so the event decoding in

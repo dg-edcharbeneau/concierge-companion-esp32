@@ -63,9 +63,24 @@ menu "Deepgram Agent Device"
             choice wins on every later boot and this value only comes back via
             the agent's reset_voice function.
 
-            Any name in the catalog in main/voices.c works, not just the thirteen
-            offered to the model -- that is where the Irish, Australian, Indian,
-            Singaporean and Filipino accents live.
+            Any model in the catalog in main/voices.c works, in any of its
+            languages. The voice implies the language: a non-English default
+            also makes the device greet in that language and listen with
+            flux-general-multi -- or, for Japanese, Nova-3, whose start of
+            speech (and so barge-in) is about a second slower.
+
+    config DEEPGRAM_VOICE_UPDATE_IN_PLACE
+        bool "Change voice in place (UpdateSpeak) rather than reconnecting"
+        default y
+        help
+            On: set_voice sends UpdateSpeak, plus UpdateListen when the language
+            changes, and UpdatePrompt, keeping the session open. A refused
+            update falls back to a reconnect.
+
+            Off: set_voice saves the voice and reopens the session, which is
+            how it worked while UpdateSpeak was a no-op on the server
+            (docs/notes/updatespeak.md). Turn this off if a voice change is
+            acknowledged but not heard.
 
     config DEEPGRAM_FLUX_EOT_THRESHOLD
         string "Flux end-of-turn confidence threshold"

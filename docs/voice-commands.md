@@ -351,59 +351,112 @@ is `lime` here, its `lime` is `green`, its `bright teal` is `teal`, and its mute
 
 ## Changing the voice by asking
 
-The agent can change its own voice. Say "switch to a British woman" and it picks
-one, applies it, and remembers it across reboots. "Go back to your default voice"
+The agent can change its own voice, and with it the language it speaks. Say
+"switch to a British woman" or "talk to me in Spanish" and it picks a voice,
+applies it, and remembers it across reboots. "Go back to your default voice"
 undoes it.
 
-This is the first runtime-configurable setting on a device where everything else
-is compile-time, and it is built on three pieces:
+It is built on four pieces:
 
-- **A client-side function call.** `agent.think.functions` in the `Settings`
-  message declares `set_voice` and `reset_voice`. Client-side is signalled by the
-  *absence* of an `endpoint` field — with one, Deepgram would call a web service
-  instead of asking the device.
-- **A session reload.** A new `Settings` message is the only thing that actually
-  changes the voice (see below), so the device saves the choice, lets the agent
-  finish saying what it is doing, then reopens the socket.
-- **History replay.** `agent.context.messages` carries the recent turns into the
-  new session as `{"type":"History","role":...,"content":...}` entries, so the
-  conversation continues across the reload instead of starting over. Those turns
-  now come off flash as readily as out of RAM — see
-  [persistence.md](persistence.md).
-- **NVS.** Namespace `dgagent`, key `tts_voice`. This is the first application
-  use of NVS in the project; `nvs_flash_init()` was already there for Wi-Fi
-  calibration.
+- **Client-side function calls.** `agent.think.functions` in the `Settings`
+  message declares `set_voice`, `list_voices` and `reset_voice`. Client-side is
+  signalled by the *absence* of an `endpoint` field — with one, Deepgram would
+  call a web service instead of asking the device.
+- **In-place updates.** `UpdateSpeak`, plus `UpdateListen` when the language
+  changes and an `UpdatePrompt` line, change the session without reopening it
+  (`CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE`, on by default). A session reload is
+  the fallback.
+- **History replay**, for when a reload does happen. `agent.context.messages`
+  carries the recent turns into the new session as
+  `{"type":"History","role":...,"content":...}` entries, so the conversation
+  continues instead of starting over. Those turns come off flash as readily as
+  out of RAM — see [persistence.md](persistence.md).
+- **NVS.** Namespace `dgagent`, key `tts_voice`, holding the full model id.
 
-### `UpdateSpeak` does not work — measured, not assumed
+### The voice implies the language
 
-The documented way to do this is `UpdateSpeak`, which changes the voice in place
-with no reconnect. **On this account it returns `SpeakUpdated` and then changes
-nothing.** That was established by elimination, and it is worth writing down so
-nobody re-implements it:
+Every voice belongs to one language, and choosing it chooses everything else
+that depends on language:
 
-- Reproduced with a **bare `UpdateSpeak` sent nowhere near a function call**, so
-  it is not a function-calling problem.
-- Reproduced with **both** a Flux v2 provider (`flux-cliff-en`) and an Aura v1
-  provider (`aura-2-zeus-en`), so it is not Flux-specific.
-- The JSON matches Deepgram's own documented example character for character.
-- No `Error` and no `Warning` is emitted — the server acknowledges and ignores.
-- Meanwhile the *same* model id in a `Settings` message works, which is what the
-  fallback relies on.
+| | English voice | Any other voice |
+|---|---|---|
+| Listen | `flux-general-en` | `flux-general-multi`, `language_hints: [lang, "en"]`; Japanese: Nova-3, `language: "ja"` |
+| Prompt | unchanged | "Speak Spanish. The person may also use English; …" (`{{language}}`) |
+| Greeting | `CONFIG_DEEPGRAM_AGENT_GREETING` | the language's own, from `voices.c` |
 
-If that is ever fixed upstream, reinstating it means sending `UpdateSpeak` and
-skipping the reload — the catalog, persistence and function plumbing stay as-is.
+English stays in the hints so "switch back to English" is still heard. Alarm
+announcements stay English in every language: they are firmware strings, not
+the model's.
 
-### So the voice is applied by reopening the session
+**Japanese is the exception: it listens with Nova-3.** `flux-general-multi`
+kept the meaning of 13 of 30 Japanese test commands and Nova-3 22 of 30. The
+price is that barge-in signals about a second later (+1.5 s against +0.65 s),
+and that `language: "ja"` hears native English poorly, so the Japanese prompt
+line tells the model English may arrive garbled.
+
+Nova-3 as the agent's listen model also **fails to start about one session in
+five** (`FAILED_TO_START_LISTENING`, English as well as Japanese; Flux 0 of 12).
+When it does, the device reconnects once with `flux-general-multi` for that
+session rather than freezing in "failed", and tries Nova-3 again next session.
+
+**"Speak English"** is the
+phrase that works: from three English voices it arrived as スピークイングリッシュ
+or `SpeakEnglish` and the model switched voice every time, where "English,
+please" was not heard at all. Saying it in Japanese always works. The numbers are in
+[notes/languages-probe.md](notes/languages-probe.md).
+
+The languages are English, Spanish, French, German, Hindi, Russian, Portuguese,
+Japanese, Italian and Dutch: the ten `flux-general-multi` can hear. Flux TTS
+speaks 42, but a voice in a language the device cannot understand is a voice
+nobody can talk back to. Deepgram's Voice Agent page says the agent API takes
+English Flux voices only; on this account it took all nine others, measured
+with `host/agent_probe.py matrix`. See
+[notes/languages-probe.md](notes/languages-probe.md).
+
+### `UpdateSpeak` works now (it did not on 2026-08-21)
+
+When this feature was first built, `UpdateSpeak` returned `SpeakUpdated` and
+changed nothing ([notes/updatespeak.md](notes/updatespeak.md)), so the device
+applied a voice by reopening the session. Re-measured on 2026-10-28 with
+`host/agent_probe.py update-speak`, it works, and so do `UpdateListen` and
+`UpdatePrompt`. A voice change is now:
 
 1. The function call arrives; the voice is validated and written to NVS.
-2. `FunctionCallResponse` tells the agent to say it is changing voice — that
+2. `UpdateSpeak` goes out, then `UpdateListen` if the language changed, then
+   `UpdatePrompt`.
+3. Only then the `FunctionCallResponse`. It prompts the agent's next turn, and
+   the next turn is when Flux starts using the new voice, so the confirmation
+   is the first thing said in the new voice, and in the new language.
+
+**`UpdatePrompt` appends, it does not replace.** The line it sends says "From now
+on you are speaking in the voice called carmen", because the `{{voice}}` sentence
+in the original prompt is now stale and the newest line has to win. The next
+fresh `Settings` builds a clean prompt from the files.
+
+An `Error` or `Warning` within 5 s of sending an update, while its
+acknowledgement is still owed, is taken as the update being refused and
+answered with a reload; outside that window an `Error` is an `Error`. An
+acknowledgement that never comes reloads too, on its own timer. Only
+`ListenUpdated` and `PromptUpdated` are waited for: `SpeakUpdated` can be held
+back while the server finishes queued audio. A failed send or allocation
+reloads instead of half-applying, and after four in-place changes a session
+reloads anyway, because each `UpdatePrompt` appends to the server-side prompt.
+The voice is already saved, so the fresh `Settings` applies it either way.
+
+### The reload path
+
+With `CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE` off, or as the fallback above:
+
+1. `FunctionCallResponse` tells the agent to say it is changing voice. That
    sentence is spoken in the **old** voice, which is the audible cue.
-3. On `AgentAudioDone`, `on_reload_required` fires and `session_ctl` tears the
-   session down and starts a new one, roughly a **1 second gap**.
-4. The new `Settings` carries the new voice plus the replayed history, and
+2. On `AgentAudioDone`, or after an 8 s backstop, `on_reload_required` fires and
+   `session_ctl` tears the session down and starts a new one, roughly a
+   **1 second gap**.
+3. The new `Settings` carries the new voice plus the replayed history, and
    **omits the greeting** so it resumes rather than re-introducing itself.
 
-Deferring to `AgentAudioDone` is what stops the socket disappearing mid-sentence.
+Turn the option off if a voice change is ever acknowledged but not heard: that
+is what the 2026-08-21 server did.
 
 ### The history buffer
 
@@ -444,23 +497,41 @@ on the old setting.
 
 Off by default. Turn it on to print every JSON body sent to Deepgram — the
 fastest way to confirm that what you think you are sending is what actually goes
-on the wire. It was how the `UpdateSpeak` behaviour above got pinned down. The
+on the wire. It was how the 2026-08-21 `UpdateSpeak` behaviour got pinned down. The
 API key is not in the body; it rides in an HTTP header.
 
 ### The catalog
 
-All 36 Flux voices live in [main/voices.c](../main/voices.c), each with a `featured`
-flag. Only the 13 featured ones are offered to the model as an enum — the schema
-and its descriptions ride in every `Settings` message, so the full list would be
-a couple of kilobytes per reconnect and a harder choice for the LLM. Settings
-grows from 587 to 1761 bytes as it is. The other 23 (where the Irish, Australian,
-Indian, Singaporean and Filipino accents live) stay selectable as the
-`CONFIG_DEEPGRAM_FLUX_VOICE` factory default, and widening the offer later is a
-one-flag change.
+All 149 voices live in [main/voices.c](../main/voices.c): 36 English and 113
+across the other nine languages. The model sees three layers:
 
-`CONFIG_DEEPGRAM_FLUX_VOICE` is now the **factory default** — used on first boot
-and after an NVS erase. `ESP_ERR_NVS_NOT_FOUND` on read is the ordinary
-first-boot case, not an error.
+- **`set_voice`'s description** names the 13 featured English voices, names
+  only, and one featured voice per other language ("Spanish (carmen)"), so "a
+  French voice" needs no round trip.
+- **`list_voices(language)`** returns every voice in one language with what it
+  sounds like, in the function response, so neither the catalog nor the
+  descriptions ride in `Settings`. A request like "a British woman" or an Irish
+  accent goes through it.
+- **No enum on `voice`.** A hundred-odd names in every `Settings` would cost more
+  than the whole feature, and `voices_find()` refuses anything not in the table
+  anyway.
+
+**`Settings` got smaller, not bigger.** Its ceiling is internal heap at send
+time, not the wire (see [persistence.md](persistence.md)), and `main` was already
+past the 20 kB at which sessions once flapped. A first cut that kept the English
+descriptions in `set_voice` added 227 B, so they moved to `list_voices`.
+Measured on the board with the same 466 B of history: `main` 20,685 B, this
+branch 20,445 B with an English voice (−240) and 20,584 B with a Japanese one
+(−101).
+
+`host/voices.sh` checks the table: unique short names across languages, every
+model id `flux-<name>-<lang>`, every language one Flux STT can hear, one featured
+voice per language, and text that fits its buffers. `host/agent_probe.py catalog`
+synthesises every model id, so a typo fails on a laptop rather than on a device.
+
+`CONFIG_DEEPGRAM_FLUX_VOICE` is the **factory default**, used on first boot and
+after an NVS erase. `ESP_ERR_NVS_NOT_FOUND` on read is the ordinary first-boot
+case, not an error.
 
 ---
 

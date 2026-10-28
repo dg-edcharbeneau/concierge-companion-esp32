@@ -3,6 +3,7 @@
 #
 #   ./prompt.sh                 the prompt as this build's sdkconfig would send it
 #   ./prompt.sh --resumed       what a session reopened by a voice change sends
+#   ./prompt.sh --spanish       ... with a Spanish voice, for the {{language}} line
 #
 # Everything here compiles main/agent_prompt.c itself, so what it prints is what
 # the device assembles.
@@ -12,7 +13,7 @@ cd "$(dirname "$0")"
 ARGS=""
 for arg in "$@"; do
     case "$arg" in
-        --resumed)  ARGS="--resumed" ;;
+        --resumed|--spanish)  ARGS="$ARGS $arg" ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done

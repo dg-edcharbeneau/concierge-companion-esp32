@@ -81,11 +81,12 @@ typedef struct {
     /*
      * The session must be reopened to pick up a setting change.
      *
-     * UpdateSpeak is the documented way to change the voice in place, but it
-     * returns SpeakUpdated and then does nothing, so the only mechanism that
-     * actually works is a new Settings message -- which means a new session.
-     * Runs on the WebSocket task, which cannot stop the client itself, so the
-     * handler must hand the work to another task.
+     * A voice change normally applies in place through UpdateSpeak and friends
+     * (CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE). This is the route when that is
+     * off, and the fallback when the server refuses an update: a new Settings
+     * message, which means a new session. Runs on the WebSocket task, which
+     * cannot stop the client itself, so the handler must hand the work to
+     * another task.
      */
     void (*on_reload_required)(void *ctx);
 

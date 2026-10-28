@@ -1,9 +1,44 @@
 # `UpdateSpeak` returns `SpeakUpdated` but the voice never changes
 
 > **Historical finding**, investigated 2026-08-21, against
-> `/v1/agent/converse` as it behaved then. It is why a voice change reopens
-> the session instead of updating it in place; see `docs/voice-commands.md`.
-> Re-measure before assuming the server side is unchanged.
+> `/v1/agent/converse` as it behaved then. **No longer true as of 2026-10-28**
+> (re-test below): the device now changes voice in place, with the reload kept
+> as a fallback and behind `CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE`.
+
+## Re-test, 2026-10-28: it works
+
+`host/agent_probe.py update-speak` ran the same repro from a laptop, in the
+device's audio format (linear16, 16 kHz, `container: none`), `flux-general-en`,
+gpt-5.4-mini. Each turn was an `InjectAgentMessage` of "One, two, three, four,
+five.", captured to a WAV.
+
+| turn | voice sent | bytes | median F0 | transcript |
+|---|---|---|---|---|
+| A-before | `flux-haley-en` (Settings) | 48,640 | 242 Hz | 12345 |
+| `UpdateSpeak` → `flux-cliff-en` | | | | `SpeakUpdated` |
+| A-after1 | | 158,720 | 93 Hz | 12345. |
+| A-after2 | | 181,760 | 99 Hz | 12345. |
+
+The F0 drop from Haley's range to Cliff's, on both turns after the update, is
+the change. F0 is autocorrelation over voiced frames this time, not the
+peak-bin probe discredited below, but it is still only a hint. **The listening
+check is pending**: it is in the attended block of the branch that adopted this.
+The longer "after" turns are Cliff's slower delivery; a nova-3 transcript of
+each WAV reads the same five digits.
+
+Case B, a language change mid-session, also took: `UpdateSpeak` to
+`flux-carmen-es`, `UpdateListen` to `flux-general-multi` with
+`language_hints ["es","en"]`, and `UpdatePrompt` each got their
+acknowledgement (`SpeakUpdated`, `ListenUpdated`, `PromptUpdated`), and a
+Spanish question synthesised by `/v2/speak` was heard as "¿Cuál es la capital de
+Francia?" and answered "La capital de Francia es París."
+
+What changed server-side is not known. Nothing in the client changed: the
+message is the same documented shape as before.
+
+---
+
+The original finding follows, unchanged.
 
 ## Summary
 

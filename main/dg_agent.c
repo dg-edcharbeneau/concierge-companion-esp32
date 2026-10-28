@@ -1280,17 +1280,320 @@ static void send_function_response(const char *id, const char *name, const char 
 
 
 /*
- * WHY THIS REOPENS THE SESSION
+ * agent.listen.provider and agent.speak.provider, built in one place each.
  *
- * UpdateSpeak is the documented way to change the voice in place. On this
- * account it answers SpeakUpdated and then changes nothing -- reproduced with a
- * bare UpdateSpeak sent nowhere near a function call, with both a Flux v2 and
- * an Aura v1 provider, against JSON matching the documented example exactly. A
- * fresh Settings message does work, so that is what this does.
+ * Settings and the in-place Update messages both carry these blocks, and two
+ * copies of them would drift -- a hint added to one and not the other is a
+ * session that hears Spanish only until the next reconnect.
  *
- * The cost is a new session, which is why dg_agent keeps a short history and
- * replays it -- see history_to_json().
+ * The voice implies the language (see voices.h). English keeps
+ * flux-general-en, which every barge-in measurement was made on; most others
+ * are flux-general-multi hinted at that language AND English, so "switch back to
+ * English" is still heard. A language flagged `nova` -- Japanese -- is Nova-3 in
+ * that language instead, which hears it far better and English far worse; see
+ * voices.c. `version` is what selects Flux -- the model name alone is not
+ * enough, and v1 is assumed when the field is absent. Thresholds are Flux's and
+ * omitted unless configured, because the server defaults are the right starting
+ * point.
  */
+/*
+ * Set when Nova-3 would not start listening, so the next listen block is
+ * flux-general-multi instead -- worse Japanese, but a session that runs.
+ *
+ * Nova-3 as the Agent API's listen provider failed to start in 5 of 24 fresh
+ * sessions measured on 2026-10-28, in English as well as Japanese, against 0
+ * of 12 for flux-general-multi (docs/notes/languages-probe.md). Treated as an
+ * Error, that froze the device in "failed" until a hold or a BOOT press about
+ * one Japanese session in five.
+ *
+ * Cleared by the next SettingsApplied, after the Settings it shaped has gone:
+ * the session after this one tries Nova-3 again. Written and read only on the
+ * WebSocket task.
+ */
+static bool s_nova_fallback;
+
+static void add_listen_provider(cJSON *listen)
+{
+    const language_t *lang = voices_language(voices_current());
+    cJSON *provider = cJSON_AddObjectToObject(listen, "provider");
+    cJSON_AddStringToObject(provider, "type", "deepgram");
+    if (lang->nova && !s_nova_fallback) {
+        /* `language` is the v1 option Flux does not take; the end-of-turn
+         * tunables below are Flux-only and would be refused here. */
+        cJSON_AddStringToObject(provider, "version", "v1");
+        cJSON_AddStringToObject(provider, "model", "nova-3");
+        cJSON_AddStringToObject(provider, "language", lang->code);
+        return;
+    }
+    cJSON_AddStringToObject(provider, "version", "v2");
+    if (voices_is_english(lang)) {
+        cJSON_AddStringToObject(provider, "model", "flux-general-en");
+    } else {
+        /* language_hints, not `language`: that is a v1 listen-provider option. */
+        cJSON_AddStringToObject(provider, "model", "flux-general-multi");
+        cJSON *hints = cJSON_AddArrayToObject(provider, "language_hints");
+        cJSON_AddItemToArray(hints, cJSON_CreateString(lang->code));
+        cJSON_AddItemToArray(hints, cJSON_CreateString("en"));
+    }
+    if (strlen(CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD) > 0) {
+        cJSON_AddStringToObject(provider, "eot_threshold", CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD);
+    }
+#if CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS > 0
+    cJSON_AddNumberToObject(provider, "eot_timeout_ms", CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS);
+#endif
+}
+
+static void add_speak_provider(cJSON *speak)
+{
+    cJSON *provider = cJSON_AddObjectToObject(speak, "provider");
+    cJSON_AddStringToObject(provider, "type", "deepgram");
+    /* Same story as listen: "v2" is what picks Flux TTS. */
+    cJSON_AddStringToObject(provider, "version", "v2");
+    cJSON_AddStringToObject(provider, "model", voices_current_model());
+}
+
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+/*
+ * Update messages sent and not yet acknowledged, and until when an Error or a
+ * Warning is taken to be about them.
+ *
+ * Nothing in an Error names the message it answers, so attribution is by time:
+ * inside UPDATE_ACK_MS of sending an update, with acknowledgements still owed,
+ * a complaint is taken as the update refused and answered with a reload -- the
+ * voice is already in NVS, so a fresh Settings applies it whatever went wrong.
+ * Outside that window an Error is an Error. send_settings() clears all of this,
+ * so a dropped socket cannot leave a stale count to misread the next session's
+ * refusal with.
+ *
+ * An acknowledgement that never comes is the same failure without a message,
+ * and s_update_backstop is what notices it -- its own timer, for the reason
+ * s_test_backstop gives. Only ListenUpdated and PromptUpdated are owed:
+ * SpeakUpdated waits for the server to finish any audio it has queued, and
+ * sent straight after SettingsApplied it did not arrive within 6 s in two
+ * tries of two (host/agent_probe.py, 2026-10-28) on sessions that were fine.
+ * UpdateSpeak still opens the window in which an Error counts against it.
+ */
+#define UPDATE_ACK_MS 5000
+static int s_updates_pending;
+static int64_t s_update_deadline_us;
+static esp_timer_handle_t s_update_backstop;
+static portMUX_TYPE s_update_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/*
+ * Each in-place change appends to the server-side prompt (UpdatePrompt never
+ * replaces), so after this many the next change reloads instead and the prompt
+ * starts clean from the files. Counted per session.
+ */
+#define INPLACE_CHANGES_MAX 4
+static int s_inplace_changes;
+
+static void updates_clear(void)
+{
+    portENTER_CRITICAL(&s_update_lock);
+    s_updates_pending = 0;
+    portEXIT_CRITICAL(&s_update_lock);
+    if (s_update_backstop != NULL) {
+        esp_timer_stop(s_update_backstop);
+    }
+}
+
+/* True, and the window closed, if an update is still owed an acknowledgement
+ * and was sent recently enough for a complaint now to be about it. */
+static bool take_update_refusal(void)
+{
+    bool refused;
+    portENTER_CRITICAL(&s_update_lock);
+    refused = s_updates_pending > 0 && esp_timer_get_time() < s_update_deadline_us;
+    if (refused) {
+        s_updates_pending = 0;
+    }
+    portEXIT_CRITICAL(&s_update_lock);
+    if (refused && s_update_backstop != NULL) {
+        esp_timer_stop(s_update_backstop);
+    }
+    return refused;
+}
+
+static void update_acked(void)
+{
+    bool done;
+    portENTER_CRITICAL(&s_update_lock);
+    if (s_updates_pending > 0) {
+        s_updates_pending--;
+    }
+    done = (s_updates_pending == 0);
+    portEXIT_CRITICAL(&s_update_lock);
+    if (done && s_update_backstop != NULL) {
+        esp_timer_stop(s_update_backstop);
+    }
+}
+
+static void update_backstop_cb(void *arg)
+{
+    (void)arg;
+    bool owed;
+    portENTER_CRITICAL(&s_update_lock);
+    owed = s_updates_pending > 0;
+    s_updates_pending = 0;
+    portEXIT_CRITICAL(&s_update_lock);
+    /* s_ready for the reason reload_backstop_cb() gives: this can land on a
+     * session the user has just ended. */
+    if (owed && s_ready) {
+        ESP_LOGW(TAG, "voice update never acknowledged -- reopening the session instead");
+        schedule_reload();
+    }
+}
+
+static bool send_update(cJSON *root, const char *what, bool owes_ack)
+{
+    if (root == NULL) {
+        return false;
+    }
+    esp_err_t err = send_json(root, what);
+    cJSON_Delete(root);
+    if (err != ESP_OK) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_update_lock);
+    if (owes_ack) {
+        s_updates_pending++;
+    }
+    s_update_deadline_us = esp_timer_get_time() + UPDATE_ACK_MS * 1000LL;
+    portEXIT_CRITICAL(&s_update_lock);
+    if (s_update_backstop != NULL) {
+        esp_timer_stop(s_update_backstop);
+        esp_timer_start_once(s_update_backstop, UPDATE_ACK_MS * 1000ULL);
+    }
+    return true;
+}
+
+/*
+ * Applies the voice voices_set() just adopted, without reopening the session.
+ *
+ * UpdateSpeak was a no-op on this account when first tried (2026-08-21,
+ * docs/notes/updatespeak.md) and the device reopened the session instead. It
+ * was re-measured on 2026-10-28 with host/agent_probe.py and now works, along
+ * with UpdateListen and UpdatePrompt, so a change no longer costs a reconnect,
+ * a history replay and a second or so of silence.
+ *
+ * UpdatePrompt APPENDS to the prompt rather than replacing it, so the line says
+ * "from now on" and names the voice -- the {{voice}} sentence in the original
+ * prompt is now stale, and the newest line has to win. The next fresh Settings
+ * starts clean from the files.
+ *
+ * Listen is only updated when the language changes: flux-general-en is what
+ * barge-in was tuned on, and nothing else about listening depends on the voice.
+ *
+ * Runs on the WebSocket task, inside event dispatch, like send_function_response()
+ * -- plain text frames, which is safe here. The prompt line is built in PSRAM
+ * for the stack reason send_settings() gives.
+ */
+static bool apply_voice_in_place(const language_t *was)
+{
+    const voice_t *v = voices_current();
+    const language_t *lang = voices_language(v);
+
+    /*
+     * The prompt line first, because it is the one step that can fail before
+     * anything is sent: a voice whose prompt never followed would speak Spanish
+     * words in an English persona, and nothing would ever correct it.
+     *
+     * It says it REPLACES the earlier voice and language lines, because
+     * UpdatePrompt appends and the old ones stay in the prompt -- a Japanese
+     * session's "a request for English means switch voice" must not outlive
+     * Japanese. English gets an explicit line for the same reason, where a
+     * fresh Settings needs none. Japanese is the longest, at about 260 B;
+     * host/voices_test.c holds every language to LINE_LEN.
+     */
+    enum { LINE_LEN = 512 };
+    char *line = heap_caps_malloc(LINE_LEN, MALLOC_CAP_SPIRAM);
+    if (line == NULL) {
+        return false;
+    }
+    int n = snprintf(line, LINE_LEN, "Voice change, replacing any earlier voice or language "
+                     "instruction: you now speak as %s.", v->name);
+    if (n > 0 && (size_t)n < LINE_LEN) {
+        if (voices_is_english(lang)) {
+            strlcat(line, " Reply in English unless asked otherwise.", LINE_LEN);
+        } else {
+            voices_language_note(line + n, LINE_LEN - (size_t)n);
+        }
+        /* {{listen_model}} in the original prompt goes stale too when the
+         * listen side changes family. */
+        if (lang->nova != was->nova) {
+            strlcat(line, lang->nova ? " You now listen with Nova-3." :
+                                       " You now listen with Flux.", LINE_LEN);
+        }
+    }
+
+    bool ok = true;
+    cJSON *root = cJSON_CreateObject();
+    if (root != NULL) {
+        cJSON_AddStringToObject(root, "type", "UpdateSpeak");
+        add_speak_provider(cJSON_AddObjectToObject(root, "speak"));
+    }
+    ok = send_update(root, "UpdateSpeak", false);
+
+    if (ok && lang != was) {
+        root = cJSON_CreateObject();
+        if (root != NULL) {
+            cJSON_AddStringToObject(root, "type", "UpdateListen");
+            add_listen_provider(cJSON_AddObjectToObject(root, "listen"));
+        }
+        ok = send_update(root, "UpdateListen", true);
+    }
+
+    if (ok) {
+        root = cJSON_CreateObject();
+        if (root != NULL) {
+            cJSON_AddStringToObject(root, "type", "UpdatePrompt");
+            cJSON_AddStringToObject(root, "prompt", line);
+        }
+        ok = send_update(root, "UpdatePrompt", true);
+    }
+    free(line);
+    return ok;
+}
+#endif
+
+/*
+ * Applies a voice voices_set() has just adopted, by whichever route this build
+ * uses, and writes the confirmation the agent should speak into `content`.
+ *
+ * In place, the confirmation is the first turn in the new voice, so it is said
+ * in the new language too. Reloading, it is the last turn in the old one, and
+ * the reconnect follows once it has been spoken.
+ */
+static void apply_voice(const language_t *was, char *content, size_t len)
+{
+    const voice_t *v = voices_current();
+    const language_t *lang = voices_language(v);
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    /*
+     * In place unless this session has already had its share of changes (see
+     * INPLACE_CHANGES_MAX), or a step fails -- an allocation, a cJSON node, a
+     * send. A failure reloads rather than half-applying: whatever did go out,
+     * the fresh Settings carries the whole voice.
+     */
+    if (s_inplace_changes < INPLACE_CHANGES_MAX && apply_voice_in_place(was)) {
+        s_inplace_changes++;
+        if (lang != was) {
+            snprintf(content, len, "Done: you are now %s, a %s voice. Say so briefly, in %s.",
+                     v->name, lang->name, lang->name);
+        } else {
+            snprintf(content, len, "Done: you are now %s. Say so briefly.", v->name);
+        }
+        return;
+    }
+    updates_clear();
+#else
+    (void)was;
+#endif
+    schedule_reload();
+    snprintf(content, len, "Switching to %s, a %s voice. Tell the user you are changing "
+             "voice now.", v->name, lang->name);
+}
+
 /*
  * `arguments` arrives as a JSON-encoded *string*, not a nested object, so it
  * needs a second parse. Caller owns the result and must cJSON_Delete it.
@@ -1403,13 +1706,47 @@ static void handle_function_call(const cJSON *root)
 #endif
 
         if (strcmp(name->valuestring, "reset_voice") == 0) {
-            const voice_t *v = voices_default();
+            const language_t *was = voices_language(voices_current());
             voices_reset();
-            schedule_reload();
-            snprintf(content, sizeof(content),
-                     "Switching back to %s. Tell the user you are changing voice now.",
-                     v->name);
+            apply_voice(was, content, sizeof(content));
             send_function_response(id->valuestring, name->valuestring, content);
+            continue;
+        }
+
+        if (strcmp(name->valuestring, "list_voices") == 0) {
+            const language_t *lang = NULL;
+            cJSON *largs = function_args(fn);
+            if (largs != NULL) {
+                const cJSON *code = cJSON_GetObjectItemCaseSensitive(largs, "language");
+                if (cJSON_IsString(code)) {
+                    lang = voices_find_language(code->valuestring);
+                }
+                cJSON_Delete(largs);
+            }
+            if (lang == NULL) {
+                send_function_response(id->valuestring, name->valuestring,
+                                       "This device does not have voices in that language.");
+                continue;
+            }
+            /*
+             * PSRAM, not content[]: all 36 English voices with their blurbs run
+             * to about 1.6 kB, and this frame is the WebSocket task's -- the
+             * same reason the description buffers in send_settings() moved off
+             * the stack.
+             */
+            enum { LIST_LEN = 2048 };
+            char *list = heap_caps_malloc(LIST_LEN, MALLOC_CAP_SPIRAM);
+            if (list == NULL) {
+                send_function_response(id->valuestring, name->valuestring,
+                                       "The voice list is not available right now.");
+                continue;
+            }
+            int n = snprintf(list, LIST_LEN, "%s voices: ", lang->name);
+            if (n > 0 && (size_t)n < LIST_LEN) {
+                voices_list(lang, list + n, LIST_LEN - (size_t)n);
+            }
+            send_function_response(id->valuestring, name->valuestring, list);
+            free(list);
             continue;
         }
 
@@ -1424,12 +1761,10 @@ static void handle_function_call(const cJSON *root)
             }
 
             /*
-             * NO RELOAD, unlike set_voice. The voice is a Settings field and
-             * this account ignores UpdateSpeak, so changing it costs a new
-             * session; the name is only ever text inside the prompt, and telling
-             * the model here is enough for this session. {{name}} carries it
-             * from the next Settings onwards, so the two agree again as soon as
-             * anything reconnects.
+             * NO RELOAD and no UpdatePrompt: the name is only ever text inside
+             * the prompt, and telling the model here is enough for this session.
+             * {{name}} carries it from the next Settings onwards, so the two
+             * agree again as soon as anything reconnects.
              */
             esp_err_t nerr = agent_name_set(wanted);
             if (nerr != ESP_OK) {
@@ -1857,18 +2192,20 @@ static void handle_function_call(const cJSON *root)
         if (v == NULL) {
             /* Say so rather than staying silent: the agent turns this into an
              * explanation, and nothing is applied or saved. */
+            /* Without the enum the model can guess a name ("irish"), so the
+             * refusal points it at the list rather than ending the attempt. */
             send_function_response(id->valuestring, name->valuestring,
-                                   "That voice is not available on this device.");
+                                   "No voice by that name. Call list_voices for the names.");
             continue;
         }
 
         ESP_LOGI(TAG, "voice change requested: %s", v->model);
-        /* Persisted now rather than on an acknowledgement, because the new
-         * session reads it while building its Settings. */
+        const language_t *was = voices_language(voices_current());
+        /* Persisted now rather than on an acknowledgement: a reload -- the
+         * planned one, or the fallback when an update is refused -- reads it
+         * while building the new Settings. */
         voices_set(v);
-        schedule_reload();
-        snprintf(content, sizeof(content),
-                 "Switching to %s. Tell the user you are changing voice now.", v->name);
+        apply_voice(was, content, sizeof(content));
         send_function_response(id->valuestring, name->valuestring, content);
     }
 }
@@ -1953,6 +2290,11 @@ static void add_raw_reference(cJSON *array, const char *json)
 
 static esp_err_t send_settings(void)
 {
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    /* A new connection owes nothing for the last one's updates, and its own
+     * Settings refusal must not be read as theirs. */
+    updates_clear();
+#endif
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
         return ESP_ERR_NO_MEM;
@@ -1974,29 +2316,8 @@ static esp_err_t send_settings(void)
 
     cJSON *agent = cJSON_AddObjectToObject(root, "agent");
 
-    cJSON *listen_provider = cJSON_AddObjectToObject(
-        cJSON_AddObjectToObject(agent, "listen"), "provider");
-    cJSON_AddStringToObject(listen_provider, "type", "deepgram");
-
-    /*
-     * Flux. `version` is what selects it -- the model name alone is not enough,
-     * and v1 is assumed when the field is absent.
-     *
-     * No `language` here: that is a v1 listen-provider option. Flux takes
-     * `language_hints` instead, and flux-general-en already implies English.
-     * Thresholds are omitted unless configured, because the server defaults are
-     * the right starting point.
-     */
-    cJSON_AddStringToObject(listen_provider, "version", "v2");
-    cJSON_AddStringToObject(listen_provider, "model", "flux-general-en");
-    if (strlen(CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD) > 0) {
-        cJSON_AddStringToObject(listen_provider, "eot_threshold",
-                                CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD);
-    }
-#if CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS > 0
-    cJSON_AddNumberToObject(listen_provider, "eot_timeout_ms",
-                            CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS);
-#endif
+    /* Flux, in the voice's language -- see add_listen_provider(). */
+    add_listen_provider(cJSON_AddObjectToObject(agent, "listen"));
 
     cJSON *think = cJSON_AddObjectToObject(agent, "think");
     cJSON *think_provider = cJSON_AddObjectToObject(think, "provider");
@@ -2341,34 +2662,39 @@ static esp_err_t send_settings(void)
     cJSON_AddObjectToObject(tparams, "properties");
     cJSON_AddItemToArray(functions, set_test);
 
-    /* The catalog goes in the description because JSON Schema has nowhere to
-     * hang a per-enum-value note, and without it the model is choosing from
-     * bare first names. */
     /*
-     * The last of the three stack pairs, and the largest at 768 + 900 = 1,668 B.
-     * Same one-buffer PSRAM pattern as the two above.
+     * The catalog goes in the description because JSON Schema has nowhere to
+     * hang a per-enum-value note, and without it the model is choosing from
+     * bare first names.
      *
-     * 2048 rather than the 1024 the others use, and sized for growth rather than
-     * for today: 705 B is in use at thirteen featured voices, and voices.c keeps
-     * the other twenty-three precisely so widening the offer is "a one-flag
-     * change". All thirty-six would be 1,743 B, so that flag can be flipped
-     * without landing on voices_describe()'s truncation path -- which is the
-     * whole point of the catalog not living on the stack any more.
+     * NO ENUM on `voice` any more, and NO DESCRIPTIONS. With every language in
+     * the catalog an enum would be a hundred-odd names in every Settings
+     * message; instead this names the featured English voices and one per
+     * other language, list_voices hands over descriptions and the rest on
+     * request, and voices_find() still refuses anything not in the table.
+     *
+     * SIZED AGAINST INTERNAL HEAP, not the wire -- see HISTORY_REPLAY_BYTES. A
+     * first cut that kept the English descriptions here grew Settings by 227 B
+     * past a baseline already over the 20 kB the session once flapped at.
+     * Measured on the board as written, same 466 B of history: main 20,685 B,
+     * this 20,445 B with an English voice and 20,584 B with a Japanese one.
+     *
+     * The largest of the stack pairs before it moved to PSRAM, at 768 + 900 =
+     * 1,668 B. Same one-buffer pattern as the two above; 2048 has room for both
+     * catalogs with plenty to spare.
      */
     enum { VOICE_DESC_LEN = 2048 };
     char *description = heap_caps_malloc(VOICE_DESC_LEN, MALLOC_CAP_SPIRAM);
     const char *description_str = "Change the voice you speak in.";
     if (description != NULL) {
         int n = snprintf(description, VOICE_DESC_LEN,
-                         "Change the voice you speak in. Use when the user asks you to sound "
-                         "different, or asks for a particular accent or gender. Voices: ");
+                         "Change your voice, and with it your language. English: ");
         if (n > 0 && (size_t)n < VOICE_DESC_LEN) {
             voices_describe(description + n, VOICE_DESC_LEN - (size_t)n);
+            strlcat(description, ". Also: ", VOICE_DESC_LEN);
             size_t used = strlen(description);
-            if (used + 2 <= VOICE_DESC_LEN) {
-                description[used] = '.';
-                description[used + 1] = '\0';
-            }
+            voices_languages_describe(description + used, VOICE_DESC_LEN - used);
+            strlcat(description, ". Accents, descriptions, more: list_voices.", VOICE_DESC_LEN);
             description_str = description;
         }
     }
@@ -2382,10 +2708,25 @@ static esp_err_t send_settings(void)
     cJSON *props = cJSON_AddObjectToObject(params, "properties");
     cJSON *voice_prop = cJSON_AddObjectToObject(props, "voice");
     cJSON_AddStringToObject(voice_prop, "type", "string");
-    voices_add_enum(voice_prop, "enum");
     cJSON *required = cJSON_AddArrayToObject(params, "required");
     cJSON_AddItemToArray(required, cJSON_CreateString("voice"));
     cJSON_AddItemToArray(functions, set_voice);
+
+    /* The rest of the catalog, one language at a time, sent only when asked
+     * for -- so the hundred-odd voices never ride in Settings. */
+    cJSON *list_voices = cJSON_CreateObject();
+    cJSON_AddStringToObject(list_voices, "name", "list_voices");
+    cJSON_AddStringToObject(list_voices, "description",
+                            "Voices in a language, described.");
+    cJSON *lparams = cJSON_AddObjectToObject(list_voices, "parameters");
+    cJSON_AddStringToObject(lparams, "type", "object");
+    cJSON *lprops = cJSON_AddObjectToObject(lparams, "properties");
+    cJSON *lang_prop = cJSON_AddObjectToObject(lprops, "language");
+    cJSON_AddStringToObject(lang_prop, "type", "string");
+    voices_add_language_enum(lang_prop, "enum");
+    cJSON *lrequired = cJSON_AddArrayToObject(lparams, "required");
+    cJSON_AddItemToArray(lrequired, cJSON_CreateString("language"));
+    cJSON_AddItemToArray(functions, list_voices);
 
     cJSON *reset_voice = cJSON_CreateObject();
     cJSON_AddStringToObject(reset_voice, "name", "reset_voice");
@@ -2403,14 +2744,9 @@ static esp_err_t send_settings(void)
     }
 #endif
 
-    cJSON *speak_provider = cJSON_AddObjectToObject(
-        cJSON_AddObjectToObject(agent, "speak"), "provider");
-    cJSON_AddStringToObject(speak_provider, "type", "deepgram");
-    /* Same story as listen: "v2" is what picks Flux TTS. Omitting agent.speak
-     * entirely would also get Flux with flux-kit-en, but being explicit keeps
-     * the voice configurable. */
-    cJSON_AddStringToObject(speak_provider, "version", "v2");
-    cJSON_AddStringToObject(speak_provider, "model", voices_current_model());
+    /* Omitting agent.speak entirely would also get Flux with flux-kit-en, but
+     * being explicit keeps the voice configurable. */
+    add_speak_provider(cJSON_AddObjectToObject(agent, "speak"));
     /*
      * Replayed context, and the greeting only when there is none. Resuming a
      * conversation should not open with "Hi! I am running on an ESP32" -- and
@@ -2430,7 +2766,13 @@ static esp_err_t send_settings(void)
             ESP_LOGI(TAG, "EVT announce as greeting: %s", said);
             cJSON_AddStringToObject(agent, "greeting", said);
         } else if (strlen(CONFIG_DEEPGRAM_AGENT_GREETING) > 0) {
-            cJSON_AddStringToObject(agent, "greeting", CONFIG_DEEPGRAM_AGENT_GREETING);
+            /* The Kconfig greeting is English; a Spanish voice opens in Spanish.
+             * An empty Kconfig greeting still means no greeting in any language.
+             * Alarm announcements above stay English -- they are firmware
+             * strings, not the model's. */
+            const char *greeting = voices_language(voices_current())->greeting;
+            cJSON_AddStringToObject(agent, "greeting",
+                                    greeting != NULL ? greeting : CONFIG_DEEPGRAM_AGENT_GREETING);
         }
     }
 
@@ -2440,6 +2782,33 @@ static esp_err_t send_settings(void)
 }
 
 /* ---------------- server messages ---------------- */
+
+/*
+ * Nova-3 would not start listening: reconnect, and listen with
+ * flux-general-multi instead.
+ *
+ * ALWAYS A RECONNECT, even mid-session when the socket looks fine. Measured on
+ * the board twice: after a refused UpdateListen to Nova-3, an UpdateListen to
+ * Flux on the same socket is acknowledged, but the server stops reading audio
+ * -- "send queue full" from then on, 50-63 frames dropped, and once a write
+ * timeout that dropped the socket. A fresh session came up on Flux in 1.6 s.
+ *
+ * The cost is one extra Settings, sent at the moment internal heap is most
+ * stretched (see HISTORY_REPLAY_BYTES), so this never loops: s_nova_fallback
+ * makes the second attempt Flux, and Flux was not seen to fail this way.
+ */
+static void nova_fallback(void)
+{
+    s_nova_fallback = true;
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    /* Nothing owed by a session that is about to go. */
+    updates_clear();
+#endif
+    ESP_LOGW(TAG, "Nova-3 would not start -- reconnecting with flux-general-multi");
+    if (s_cb.on_reload_required) {
+        s_cb.on_reload_required(s_cb.ctx);
+    }
+}
 
 static void handle_json(const char *json, int len)
 {
@@ -2476,6 +2845,13 @@ static void handle_json(const char *json, int len)
          * nothing. Anything said before here belonged to the conversation the
          * user asked to forget. */
         s_history_frozen = false;
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+        /* A fresh session has a clean prompt to append to. */
+        s_inplace_changes = 0;
+#endif
+        /* This Settings already carried the fallback if it needed one; the
+         * next session tries Nova-3 again. */
+        s_nova_fallback = false;
         set_state(DG_AGENT_READY);
         /* An alarm that opened this session and did not go out as the greeting
          * goes out now. The keepalive task sends it; see s_announce. */
@@ -2581,13 +2957,44 @@ static void handle_json(const char *json, int len)
             ESP_LOGW(TAG, "EVT announce refused, giving up");
         }
 
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    } else if (strcmp(t, "ListenUpdated") == 0 || strcmp(t, "PromptUpdated") == 0) {
+        update_acked();
+        ESP_LOGI(TAG, "%s", t);
+
+    } else if (strcmp(t, "SpeakUpdated") == 0) {
+        /* Logged, not counted: see s_updates_pending for why it is not owed. */
+        ESP_LOGI(TAG, "%s", t);
+#endif
+
     } else if (strcmp(t, "Error") == 0) {
         const cJSON *desc = cJSON_GetObjectItemCaseSensitive(root, "description");
         const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
         ESP_LOGE(TAG, "server error [%s]: %s",
                  cJSON_IsString(code) ? code->valuestring : "?",
                  cJSON_IsString(desc) ? desc->valuestring : "?");
+        if (cJSON_IsString(code) && strcmp(code->valuestring, "FAILED_TO_START_LISTENING") == 0 &&
+            voices_language(voices_current())->nova && !s_nova_fallback) {
+            nova_fallback();
+            cJSON_Delete(root);
+            return;
+        }
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+        /*
+         * An Error just after an update, with its acknowledgement still owed,
+         * is taken as that update refused -- see s_updates_pending. The voice
+         * is already saved, so a fresh session applies it, the way that never
+         * depended on the server honouring Update*.
+         */
+        if (take_update_refusal()) {
+            ESP_LOGW(TAG, "voice update refused -- reopening the session instead");
+            schedule_reload();
+        } else {
+            set_state(DG_AGENT_ERROR);
+        }
+#else
         set_state(DG_AGENT_ERROR);
+#endif
 
     } else if (strcmp(t, "LatencyReport") == 0 || strcmp(t, "History") == 0 ||
                strcmp(t, "AgentStartedSpeaking") == 0) {
@@ -2605,6 +3012,16 @@ static void handle_json(const char *json, int len)
         ESP_LOGW(TAG, "server warning [%s]: %s",
                  cJSON_IsString(code) ? code->valuestring : "?",
                  cJSON_IsString(desc) ? desc->valuestring : "?");
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+        /* The same attribution as an Error: a model the server could not honour
+         * for an update and substituted would otherwise leave the session
+         * listening in one language and speaking another. A reload's Settings
+         * either takes the model or says so where it cannot be misread. */
+        if (take_update_refusal()) {
+            ESP_LOGW(TAG, "voice update answered with a warning -- reopening the session");
+            schedule_reload();
+        }
+#endif
 
     } else {
         /* INFO, not DEBUG: anything the server says that we do not model is
@@ -2998,6 +3415,15 @@ esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
         .name = "test_bkstp",
     };
     esp_timer_create(&tbargs, &s_test_backstop);
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    /* An in-place voice update whose acknowledgement never came; see
+     * s_updates_pending. */
+    const esp_timer_create_args_t uargs = {
+        .callback = update_backstop_cb,
+        .name = "update_bkstp",
+    };
+    esp_timer_create(&uargs, &s_update_backstop);
+#endif
     /* The announcement's retry after InjectionRefused; see s_announce. */
     const esp_timer_create_args_t iargs = {
         .callback = inject_retry_cb,

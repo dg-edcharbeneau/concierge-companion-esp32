@@ -5,3 +5,5 @@ typedef struct { const char *name; const char *model; const char *blurb; int fea
 const voice_t *voices_find(const char *name);
 const char *voices_current_model(void);
 void voices_describe(char *out, size_t out_len);
+void voices_language_note(char *out, size_t out_len);
+void voices_listen_model_name(char *out, size_t out_len);

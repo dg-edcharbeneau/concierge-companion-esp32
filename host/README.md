@@ -72,6 +72,7 @@ unimplemented and throws rather than guess, since nothing here supplies one.
 
     ./prompt.sh                 as this build's sdkconfig would send it
     ./prompt.sh --resumed       what a session reopened by a voice change sends
+    ./prompt.sh --spanish       ... with a Spanish voice, for the {{language}} line
 
 A prompt edit is a words change, and waiting on a flash to read the words back is
 the slowest possible way to review one.
@@ -92,6 +93,36 @@ One wrinkle worth knowing before you edit `prompt.sh`: `agent_prompt.c` is
 compiled from a copy in `build/`. A quoted include resolves against the
 including file's own directory before any `-I`, so left in `main/` it would pull
 in the real `faces.h` and with it cJSON.
+
+## The voice catalog
+
+    ./voices.sh              run the checks
+    HOST_LOG=1 ./voices.sh   ... and show what the module logs while doing it
+
+`main/voices.c` is a hundred-odd rows typed by hand, and a slip in one ships
+silently: a voice change that does nothing. This compiles the real module with
+NVS, logging and cJSON stubbed (`voices_stubs/`) and checks that short names are
+unique across languages, every model id is `flux-<name>-<lang>`, every language
+is one `flux-general-multi` can hear, each non-English language has one featured
+voice and a greeting, and the catalog text fits the buffers it is written into.
+
+## Asking the Agent API directly
+
+    DEEPGRAM_API_KEY=... python3 agent_probe.py update-speak OUTDIR [lang]
+    DEEPGRAM_API_KEY=... python3 agent_probe.py matrix OUTDIR [lang ...]
+    DEEPGRAM_API_KEY=... python3 agent_probe.py catalog OUTDIR
+    DEEPGRAM_API_KEY=... python3 agent_probe.py bargein OUTDIR [lang ...]
+
+What the server will actually do, without a board, in the device's audio format.
+`update-speak` re-runs the [UpdateSpeak repro](../docs/notes/updatespeak.md) and
+writes each turn as a WAV with a median F0; listening is the evidence, F0 a hint.
+With a language it also switches speak, listen and prompt mid-session. `matrix`
+plays a question synthesised by `/v2/speak` into a session per language and
+records what was heard and said. `catalog` synthesises every model id in
+`voices.c`. `bargein` plays a question over a long agent reply and times
+`UserStartedSpeaking`, the event the device's barge-in depends on. Results from
+the last run are in
+[docs/notes/languages-probe.md](../docs/notes/languages-probe.md).
 
 ## The conversation store
 

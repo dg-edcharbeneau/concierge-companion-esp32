@@ -6,6 +6,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Nine more languages, chosen by voice.** The catalog grows from 36 English
+  Flux voices to 149, adding Spanish, French, German, Hindi, Russian,
+  Portuguese, Japanese, Italian and Dutch: every language `flux-general-multi`
+  can hear. A voice brings its language with it. The device listens with
+  `flux-general-multi` hinted at that language and English, the prompt tells
+  the model to answer in it, and a fresh session greets in it. Alarm
+  announcements stay English. Deepgram's docs say the Agent API takes English
+  Flux voices only; on this account it took all nine, measured with
+  `host/agent_probe.py` (`docs/notes/languages-probe.md`). The greetings want a
+  native speaker's review.
+- **Japanese listens with Nova-3**, not `flux-general-multi`, which kept the
+  meaning of 13 of 30 Japanese test commands against Nova-3's 22. Barge-in
+  signals about a second later in Japanese, and native English is heard
+  poorly, so "Speak English" (or asking in Japanese) is the way back -- the
+  one English phrase that reliably got through. Nova-3 also fails to start
+  about one session in five (in English too); the device then reconnects once
+  on `flux-general-multi` instead of freezing in "failed".
+- `list_voices`, which hands the model every voice in one language on request.
+  That is also how the 23 English voices that were Kconfig-only (the Irish,
+  Indian, Australian, Singaporean and Filipino accents) become reachable by
+  asking. `set_voice` drops its 13-name enum and its voice descriptions, which
+  move to `list_voices`, and names one voice per language instead. `Settings`
+  shrinks: 20,685 → 20,445 B with an English voice and 20,584 B with a Japanese
+  one, same history.
+- `host/agent_probe.py`, which asks the Agent API what it will do in the
+  device's audio format: the UpdateSpeak repro, the language matrix, and a check
+  of every model id. `host/voices.sh` checks the catalog table.
+
+### Changed
+
+- **A voice change no longer reopens the session.** `UpdateSpeak` works again
+  (it was a no-op on 2026-08-21), so `set_voice` sends it, plus `UpdateListen`
+  on a language change and an `UpdatePrompt` line, and the confirmation is the
+  first thing said in the new voice. A refused update falls back to the old
+  reload. `CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE` (default on) chooses.
+
 ### Fixed
 
 - The AXP2101's charge target and rail report is logged 10 s after boot
