@@ -113,11 +113,11 @@ static void colours(void)
     check("colour: twelve o'clock is straight up", fabsf(x0 - PANEL_C) < 0.01f && y0 < PANEL_C);
     check("colour: swatches sit inside the panel", PANEL_RING_R + PANEL_SWATCH_R + 3 < PANEL_C);
 
-    /* One dial: a slot per colour, evenly spaced, Fuschia at twelve. */
+    /* One dial: a slot per colour, evenly spaced, Fuchsia at twelve. */
     check("colour: the dial has a slot for every colour, and no more",
           (int)orb_colors_count() == PANEL_SLOTS);
-    check("colour: twelve o'clock is fuschia, the default",
-          strcmp(orb_colors_name(0), "fuschia") == 0);
+    check("colour: twelve o'clock is fuchsia, the default",
+          strcmp(orb_colors_name(0), "fuchsia") == 0);
     int even = 1;
     for (int s = 0; s < PANEL_SLOTS; s++) {
         float xa, ya, xb, yb;
@@ -130,10 +130,10 @@ static void colours(void)
     check("colour: the swatch at twelve is slot 0",
           hit(PANEL_PAGE_COLOR, PANEL_C, PANEL_C - PANEL_RING_R + 1) == PANEL_HIT_SLOT);
 
-    /* The design's checks: dark on Fuschia, white on Led. */
-    const int fuschia = orb_colors_find("fuschia"), led = orb_colors_find("led");
-    check("colour: fuschia gets a dark check",
-          fuschia >= 0 && ui_tone_luma(orb_colors_rgb((size_t)fuschia)) >= CHECK_DARK_LUMA);
+    /* The design's checks: dark on Fuchsia, white on Led. */
+    const int fuchsia = orb_colors_find("fuchsia"), led = orb_colors_find("led");
+    check("colour: fuchsia gets a dark check",
+          fuchsia >= 0 && ui_tone_luma(orb_colors_rgb((size_t)fuchsia)) >= CHECK_DARK_LUMA);
     check("colour: led gets a white check",
           led >= 0 && ui_tone_luma(orb_colors_rgb((size_t)led)) < CHECK_DARK_LUMA);
     check("colour: the plain word finds it too", orb_colors_find("purple") == led);

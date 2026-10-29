@@ -54,7 +54,7 @@ void faces_describe(char *out, size_t out_len)
 }
 void orb_colors_describe(char *out, size_t out_len)
 {
-    snprintf(out, out_len, "fuschia (magenta, the default), clay (red), ...");
+    snprintf(out, out_len, "fuchsia (magenta, the default), clay (red), ...");
 }
 
 int main(int argc, char **argv)

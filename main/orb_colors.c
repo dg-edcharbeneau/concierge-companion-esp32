@@ -21,16 +21,18 @@ static const char *TAG = "orb_colors";
 #define NVS_KEY_COLOR "orb_color"
 
 /*
- * The device's palette, from Ed's "Color palette" sheet: one primary and six
- * secondaries, each a brand name over the plain name for its colour. Names are
- * the sheet's, lowercased to match the other catalogs -- "fuschia" spelt as the
- * sheet spells it.
+ * The device's palette: Deepgram's brand colours (the brand starter kit's
+ * "Color palette", the source of truth), the primary Fuchsia and the six
+ * supporting colours, each a brand name over the plain name for its colour.
+ * Names are the brand's, lowercased to match the other catalogs. The brand's
+ * other two primaries and its functional colours are off-white, off-black,
+ * black, grey and white, which are no orb colour.
  *
  * IN DIAL ORDER. The touch panel's picker sets them evenly round one dial,
- * clockwise from twelve o'clock, by index, so this order is the dial's: Fuschia
+ * clockwise from twelve o'clock, by index, so this order is the dial's: Fuchsia
  * at twelve, as the "Radial color picker" design puts it, then round.
  *
- * FUSCHIA IS FIRST, AND THE DEFAULT. Index 0 is what the device boots in and
+ * FUCHSIA IS FIRST, AND THE DEFAULT. Index 0 is what the device boots in and
  * what "put it back to normal" returns to. There is no white: the out-of-box
  * look is the primary colour, and every screen that follows the orb's colour
  * (ui_tone.h) follows it there.
@@ -40,7 +42,7 @@ static const char *TAG = "orb_colors";
  * into every session's function schema, so they are one word each.
  */
 static const orb_color_t s_colors[] = {
-    { "fuschia",  0xE04CFF, "magenta" },
+    { "fuchsia",  0xE042FF, "magenta" },
     { "clay",     0xEB2A2E, "red" },
     { "bakelite", 0xFA8100, "orange" },
     { "brass",    0xF7F300, "yellow" },

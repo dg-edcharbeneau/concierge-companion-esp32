@@ -3914,7 +3914,7 @@ static esp_err_t build_ui(void)
     const int saved_color = orb_colors_saved();
     s_color_index = saved_color >= 0 ? saved_color : CONFIG_UI_DEFAULT_ORB_COLOR;
     if (s_color_index < 0 || (size_t)s_color_index >= orb_colors_count()) {
-        s_color_index = 0;   /* fuschia, the palette's default */
+        s_color_index = 0;   /* fuchsia, the palette's default */
     }
     s_tint_rgb = orb_colors_rgb((size_t)s_color_index);
     apply_tint();

@@ -847,7 +847,7 @@ menu "Deepgram Agent Device"
 
     choice UI_DEFAULT_ORB_COLOR_CHOICE
         prompt "Default orb colour"
-        default UI_DEFAULT_ORB_COLOR_FUSCHIA
+        default UI_DEFAULT_ORB_COLOR_FUCHSIA
         help
             What colour the orb's dots boot as until one is chosen. Any of these
             can be asked for at runtime ("change the colour to blue") or picked
@@ -858,13 +858,13 @@ menu "Deepgram Agent Device"
             device can boot in is then also one the agent can be asked to return
             to. A hex here could ship a board whose default has no name, and
             "put it back to normal" would have nothing to reach for. The agent
-            is told index 0, Fuschia, is the default whatever is chosen here.
+            is told index 0, Fuchsia, is the default whatever is chosen here.
 
             Affects the orb only. The spectrum colours its bands by frequency and
             by which half of the conversation is live, so it ignores this.
 
-        config UI_DEFAULT_ORB_COLOR_FUSCHIA
-            bool "Fuschia -- magenta, the palette's primary"
+        config UI_DEFAULT_ORB_COLOR_FUCHSIA
+            bool "Fuchsia -- magenta, the palette's primary"
         config UI_DEFAULT_ORB_COLOR_CLAY
             bool "Clay -- red"
         config UI_DEFAULT_ORB_COLOR_BAKELITE
@@ -881,7 +881,7 @@ menu "Deepgram Agent Device"
 
     config UI_DEFAULT_ORB_COLOR
         int
-        default 0 if UI_DEFAULT_ORB_COLOR_FUSCHIA
+        default 0 if UI_DEFAULT_ORB_COLOR_FUCHSIA
         default 1 if UI_DEFAULT_ORB_COLOR_CLAY
         default 2 if UI_DEFAULT_ORB_COLOR_BAKELITE
         default 3 if UI_DEFAULT_ORB_COLOR_BRASS

@@ -35,7 +35,7 @@ MIT. It has a vocabulary rather than a level meter:
 Amplitude scales how **deep** a gesture goes, never how fast. Driving rate from
 level is frequency modulation, and reads as vibration rather than as a voice.
 
-The dots are Fuschia, the palette's primary, by default and can be recoloured by asking — see "Changing
+The dots are Fuchsia, the palette's primary, by default and can be recoloured by asking — see "Changing
 the orb's colour by asking" in [voice-commands.md](voice-commands.md).
 The colour chosen last, by voice or on the touch panel, survives a reboot;
 `CONFIG_UI_DEFAULT_ORB_COLOR` picks what it boots as until one has been chosen.
@@ -314,7 +314,7 @@ talking and the microphone keeps listening.
 | page | controls | the same as |
 |---|---|---|
 | Sound | mic gain (left) and volume (right) as linked pairs: + above, - below, and between them a bridge showing the value as a level meter, its number and its name; the button that cannot go further turns dark at a limit | `set_mic_gain`, `set_volume` |
-| Colour | the 7 palette colours evenly round one dial, Fuschia at twelve; the one in force is ringed and checked (dark check on a light swatch, white on a dark one), its name in the middle in itself over the plain colour word | `set_color` |
+| Colour | the 7 palette colours evenly round one dial, Fuchsia at twelve; the one in force is ringed and checked (dark check on a light swatch, white on a dark one), its name in the middle in itself over the plain colour word | `set_color` |
 | Toggles | noise reduction on/off; 12-hour/24-hour | BOOT double click; `set_clock {hours}` |
 | Timers & alarms | the soonest first, one at a time, ‹ › for the rest; Cancel takes two taps | the `alarms` tool |
 

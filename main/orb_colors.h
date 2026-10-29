@@ -64,7 +64,7 @@ void orb_colors_save(size_t index);
 /* Appends a JSON string array of the names, for the function schema's `enum`. */
 void orb_colors_add_enum(cJSON *parent, const char *key);
 
-/* Writes "fuschia (magenta, the default), clay (red), ..." for the function description,
+/* Writes "fuchsia (magenta, the default), clay (red), ..." for the function description,
  * because JSON Schema has nowhere to hang a per-value note. Truncates rather
  * than overflowing. */
 void orb_colors_describe(char *out, size_t out_len);

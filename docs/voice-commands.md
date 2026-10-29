@@ -322,7 +322,7 @@ half of the outgoing one's output.
 
 "Make it purple" works, and so does "put it back to normal". `set_color` takes a
 name from the seven-colour palette in [main/orb_colors.c](../main/orb_colors.c),
-after Ed's "Color palette" sheet: Fuschia, the primary and the default, then Clay,
+from Deepgram's brand palette: Fuchsia, the primary and the default, then Clay,
 Bakelite, Brass, Phosphor, Glass and Led. The model gets each brand name with its
 plain colour word ("led (purple)"), so "make it purple" lands on Led. The tool is
 the sibling of `set_face` in most mechanical respects: no `Settings` field,
@@ -356,10 +356,10 @@ three RGB565 channels. Two consequences worth knowing:
   (87..249 across the parity dump's 6,384 dots), and a multiplicative tint keeps
   that as luminance instead of flattening the shell to one flat colour.
 
-Names are the sheet's, lowercased, and spelt as it spells them: `fuschia`, not
-`fuchsia`. The model picks from the enum, so the spelling only matters to
-someone reading the log. A colour saved under a name the palette no longer has
-(any of the old thirteen) boots as Fuschia.
+Names and values are the brand palette's, lowercased: Fuchsia is `#E042FF`.
+(Ed's earlier "Color palette" sheet had `fuschia` at `#E04CFF`; the brand
+palette is the source of truth.) A colour saved under a name the palette no
+longer has (any of the old thirteen, or `fuschia`) boots as Fuchsia.
 
 ## Changing the voice by asking
 

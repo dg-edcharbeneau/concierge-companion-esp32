@@ -56,16 +56,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **A new palette, and a picker with one dial.** The orb's thirteen Vira colours
-  become the seven of Ed's "Color palette" sheet: Fuschia (#E04CFF), the primary
-  and now the default, then Clay, Bakelite, Brass, Phosphor, Glass and Led. White
-  is gone, so the out-of-box orb and everything that takes its colour (text,
-  clock, touch panel, Echo's hub) are Fuschia-tinted. The colour page puts all
-  seven evenly round one dial, Fuschia at twelve, per the "Radial color picker"
+  become Deepgram's brand colours: Fuchsia (#E042FF), the primary and now the
+  default, then Clay, Bakelite, Brass, Phosphor, Glass and Led. White is gone, so the out-of-box orb and everything that takes its colour (text,
+  clock, touch panel, Echo's hub) are Fuchsia-tinted. The colour page puts all
+  seven evenly round one dial, Fuchsia at twelve, per the "Radial color picker"
   design. There is no second page and no "+2". The selected swatch is ringed and
   checked, dark on a light colour and white on a dark one, with its name in the
   middle over the plain colour word. The model gets each name with its plain word
   ("led (purple)"), and `set_color` accepts either. A colour saved under an old
-  name boots as Fuschia. `host/panel.sh` now links `orb_colors.c` and checks the
+  name boots as Fuchsia. `host/panel.sh` now links `orb_colors.c` and checks the
   dial against it.
 - The microphone uplink hold has one bit per holder (`AUDIO_HOLD_ALARM`,
   `AUDIO_HOLD_ECHO`), so Echo closing for an alarm cannot release the alarm's

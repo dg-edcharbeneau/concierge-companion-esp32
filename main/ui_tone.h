@@ -6,7 +6,7 @@
  * The UI's colours are designed in white and neutral greys (Ed's reference
  * sheets), and every one of them is derived from the orb colour by one of three
  * rules. Under white each rule returns its input unchanged, so a white orb would
- * be exactly the reference; the palette's own colours, Fuschia the default among
+ * be exactly the reference; the palette's own colours, Fuchsia the default among
  * them, re-hue it.
  *
  *   ui_tone_mul    Light things, and ink on them: white button fills, the
