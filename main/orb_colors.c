@@ -21,42 +21,32 @@ static const char *TAG = "orb_colors";
 #define NVS_KEY_COLOR "orb_color"
 
 /*
- * The Vira palette's accent colours. Names are the palette's, lowercased to match
- * the other catalogs.
+ * The device's palette, from Ed's "Color palette" sheet: one primary and six
+ * secondaries, each a brand name over the plain name for its colour. Names are
+ * the sheet's, lowercased to match the other catalogs -- "fuschia" spelt as the
+ * sheet spells it.
  *
- * WHITE IS FIRST, NOT WHERE THE PALETTE PUTS IT. Index 0 is the boot default, and
- * 0xFFFFFF is the rasteriser's exact identity -- so keeping it first is what makes
- * the device's out-of-box look unchanged and makes "put it back to normal" a real
- * return rather than an approximation. The remaining thirteen are in palette order.
+ * IN DIAL ORDER. The touch panel's picker sets them evenly round one dial,
+ * clockwise from twelve o'clock, by index, so this order is the dial's: Fuschia
+ * at twelve, as the "Radial color picker" design puts it, then round.
  *
- * NAMES ARE NOT ALL THE PALETTE'S. Its "acid lime" is plain lime here, its "lime"
- * is green, its "bright teal" is teal, and its muted #80cbc4 teal is dropped
- * entirely. The palette names three greens and two teals by relative intensity,
- * which is fine to read off a swatch and poor to say out loud: "lime" and "acid
- * lime" are a coin toss spoken aloud, and the pair only existed to tell each other
- * apart. One name per colour a person would actually ask for.
+ * FUSCHIA IS FIRST, AND THE DEFAULT. Index 0 is what the device boots in and
+ * what "put it back to normal" returns to. There is no white: the out-of-box
+ * look is the primary colour, and every screen that follows the orb's colour
+ * (ui_tone.h) follows it there.
  *
- * BLURBS ONLY WHERE THE NAME DOES NOT CARRY IT. All thirteen go into every
- * session's function schema, so describing "pink" as pink is tokens for nothing.
- * They are kept for the brand name the model cannot know, and where a colour is
- * not quite what its name suggests -- lime here is yellow-green, and teal sits
- * close enough to cyan to be worth separating.
+ * THE PLAIN NAME DOES TWO JOBS: it is what the picker prints under the brand
+ * name, and what tells the model that "make it purple" means led. Every one goes
+ * into every session's function schema, so they are one word each.
  */
 static const orb_color_t s_colors[] = {
-    { "white",       0xFFFFFF, "the plain white dots it normally shows; the "
-                               "default, and the way back from any other colour" },
-    { "vira",        0xE9A581, "a soft peach-coral" },
-    { "tomato",      0xF85044, "a warm red" },
-    { "orange",      0xFF7042, NULL },
-    { "yellow",      0xFFCF3D, NULL },
-    { "lime",        0xC6FF00, "a sharp yellow-green" },
-    { "green",       0x39EA5F, NULL },
-    { "teal",        0x64FFDA, "a vivid aqua" },
-    { "cyan",        0x57D7FF, NULL },
-    { "blue",        0x5393FF, NULL },
-    { "indigo",      0x758AFF, "a blue-violet" },
-    { "purple",      0xB54DFF, NULL },
-    { "pink",        0xFF669E, NULL },
+    { "fuschia",  0xE04CFF, "magenta" },
+    { "clay",     0xEB2A2E, "red" },
+    { "bakelite", 0xFA8100, "orange" },
+    { "brass",    0xF7F300, "yellow" },
+    { "phosphor", 0x7CD941, "green" },
+    { "glass",    0x00B2FF, "blue" },
+    { "led",      0x7F39FF, "purple" },
 };
 
 #define COLOR_COUNT (sizeof(s_colors) / sizeof(s_colors[0]))
@@ -69,6 +59,11 @@ size_t orb_colors_count(void)
 const char *orb_colors_name(size_t index)
 {
     return (index < COLOR_COUNT) ? s_colors[index].name : NULL;
+}
+
+const char *orb_colors_plain(size_t index)
+{
+    return (index < COLOR_COUNT) ? s_colors[index].plain : NULL;
 }
 
 uint32_t orb_colors_rgb(size_t index)
@@ -84,7 +79,8 @@ int orb_colors_find(const char *name)
         return -1;
     }
     for (size_t i = 0; i < COLOR_COUNT; i++) {
-        if (strcasecmp(name, s_colors[i].name) == 0) {
+        /* The plain name too: "purple" said back as the argument still lands. */
+        if (strcasecmp(name, s_colors[i].name) == 0 || strcasecmp(name, s_colors[i].plain) == 0) {
             return (int)i;
         }
     }
@@ -152,11 +148,9 @@ void orb_colors_describe(char *out, size_t out_len)
 
     for (size_t i = 0; i < COLOR_COUNT; i++) {
         const char *sep = (used > 0) ? ", " : "";
-        int n = (s_colors[i].blurb != NULL)
-                    ? snprintf(out + used, out_len - used, "%s%s (%s)",
-                               sep, s_colors[i].name, s_colors[i].blurb)
-                    : snprintf(out + used, out_len - used, "%s%s",
-                               sep, s_colors[i].name);
+        /* The default says so: it is where "back to normal" goes. */
+        int n = snprintf(out + used, out_len - used, "%s%s (%s%s)", sep, s_colors[i].name,
+                         s_colors[i].plain, i == 0 ? ", the default" : "");
         if (n < 0 || (size_t)n >= out_len - used) {
             /* Truncated: better a short catalog than a corrupt one. */
             out[out_len - 1] = '\0';

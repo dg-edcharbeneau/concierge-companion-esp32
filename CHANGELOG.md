@@ -8,6 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Echo, with the agent calling the levels.** A memory game after Ed's
+  "Echo" design. Four quarter buttons in the palette's Phosphor, Clay, Brass and
+  Glass, each with its own note, sit round a hub that shows the level. Reach
+  it by a sideways swipe on from the stopwatch (orb clock → stopwatch → Echo →
+  orb clock) or by asking (`play_echo`, 113 B of `Settings`). Between levels
+  the agent calls out the new one in its own words: encouraging to level 9,
+  teasing to 14, snarky past that. Each callout is an `InjectUserMessage` with
+  its instruction inside, so the prompt carries nothing for it, and the next
+  round waits for it to finish. While Echo is up the microphone is held, the
+  callouts are kept out of the history, a session is started if none is
+  running, and the idle timeout waits until two minutes after the last press.
+  The best level is in NVS (`echo_best`). `CONFIG_ECHO`, default on;
+  `CONFIG_UI_ECHO_SELFTEST` for the bench. See `docs/echo.md`.
+- `audio_io_tone()`: a single tone, synthesised by the playback task as the
+  alarm chime is. It is not counted by `audio_io_playback_active()`, which keeps
+  meaning "the agent is speaking".
+
 - **Nine more languages, chosen by voice.** The catalog grows from 36 English
   Flux voices to 149, adding Spanish, French, German, Hindi, Russian,
   Portuguese, Japanese, Italian and Dutch: every language `flux-general-multi`
@@ -38,6 +55,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A new palette, and a picker with one dial.** The orb's thirteen Vira colours
+  become the seven of Ed's "Color palette" sheet: Fuschia (#E04CFF), the primary
+  and now the default, then Clay, Bakelite, Brass, Phosphor, Glass and Led. White
+  is gone, so the out-of-box orb and everything that takes its colour (text,
+  clock, touch panel, Echo's hub) are Fuschia-tinted. The colour page puts all
+  seven evenly round one dial, Fuschia at twelve, per the "Radial color picker"
+  design. There is no second page and no "+2". The selected swatch is ringed and
+  checked, dark on a light colour and white on a dark one, with its name in the
+  middle over the plain colour word. The model gets each name with its plain word
+  ("led (purple)"), and `set_color` accepts either. A colour saved under an old
+  name boots as Fuschia. `host/panel.sh` now links `orb_colors.c` and checks the
+  dial against it.
+- The microphone uplink hold has one bit per holder (`AUDIO_HOLD_ALARM`,
+  `AUDIO_HOLD_ECHO`), so Echo closing for an alarm cannot release the alarm's
+  hold.
 - **A voice change no longer reopens the session.** `UpdateSpeak` works again
   (it was a no-op on 2026-08-21), so `set_voice` sends it, plus `UpdateListen`
   on a language change and an `UpdatePrompt` line, and the confirmation is the

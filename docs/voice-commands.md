@@ -172,6 +172,16 @@ time. It will otherwise answer from the last time it read the clock, or from
 nothing at all. Without a valid clock, `get_time` says so and `set_alarm`
 refuses, but a timer still works, on the monotonic clock.
 
+## Playing Echo by asking
+
+"Let's play Echo" calls `play_echo`, which brings [the game](echo.md) up
+while the conversation carries on. From then on the agent calls out each new
+level: encouraging to level 9, teasing to 14, snarky past that. Those calls are
+not tools. The device puts each one to the agent as a user message
+(`InjectUserMessage`) with its instruction inside, so the prompt carries nothing
+for them; the tool adds 113 B to `Settings`. The microphone is held while the
+game is up, so talking to the agent means swiping out of it first.
+
 ## Asking how the Wi-Fi is
 
 `get_signal_strength` is the other reading tool. "How's your wifi?", "how's your
@@ -311,9 +321,11 @@ half of the outgoing one's output.
 ## Changing the orb's colour by asking
 
 "Make it purple" works, and so does "put it back to normal". `set_color` takes a
-name from a thirteen-entry catalog in
-[main/orb_colors.c](../main/orb_colors.c) — the accent colours of the Vira palette —
-and is the sibling of `set_face` in most mechanical respects: no `Settings` field,
+name from the seven-colour palette in [main/orb_colors.c](../main/orb_colors.c),
+after Ed's "Color palette" sheet: Fuschia, the primary and the default, then Clay,
+Bakelite, Brass, Phosphor, Glass and Led. The model gets each brand name with its
+plain colour word ("led (purple)"), so "make it purple" lands on Led. The tool is
+the sibling of `set_face` in most mechanical respects: no `Settings` field,
 no session reload, applied by the frame timer. Unlike the face it **survives a
 reboot**: `main.c`'s loop saves it by name to NVS once a change has held for 2 s
 (so trying swatches on the touch panel costs one flash write, not one a tap), and
@@ -322,7 +334,8 @@ the device boots in it.
 **The orb, and the screen around it.** The status word, the sleep clock, the
 hints, the ring round the button and the touch panel all take the colour, by the
 rules in [main/ui_tone.h](../main/ui_tone.h) — see the touch panel section of
-[display.md](display.md). On white every one of them is exactly as designed.
+[display.md](display.md). On a white orb every one of them would be exactly as
+designed; the palette has no white, so every colour re-hues them.
 **Not the spectrum**: it colours its bands by frequency and by which half of the
 conversation is live, so a single tint would destroy information rather than
 restyle it. The function description says so, which is what stops the model
@@ -336,18 +349,17 @@ three RGB565 channels. Two consequences worth knowing:
 
 - **White is an exact identity**, not an approximation of the original. Verified by
   sweeping 1,000,001 ink values against the expression it replaced — zero
-  mismatches — so the default costs nothing and colour is entirely opt-in. It is
-  done in float for this reason: the tempting `(lum * ch) >> 8` is a level low at
-  small ink, which moves the *default* appearance.
+  mismatches. It is done in float for this reason: the tempting `(lum * ch) >> 8`
+  is a level low at small ink. White is no longer in the palette, but it is still
+  what an out-of-range index shows.
 - **The shell still reads as a surface.** The ink spans a real brightness ramp
   (87..249 across the parity dump's 6,384 dots), and a multiplicative tint keeps
   that as luminance instead of flattening the shell to one flat colour.
 
-Names are the palette's, with one deliberate departure: its three greens and two
-teals are named by relative intensity, which reads fine off a swatch and badly out
-loud — "lime" against "acid lime" is a coin toss spoken aloud. So its `acid lime`
-is `lime` here, its `lime` is `green`, its `bright teal` is `teal`, and its muted
-`#80cbc4` teal is dropped.
+Names are the sheet's, lowercased, and spelt as it spells them: `fuschia`, not
+`fuchsia`. The model picks from the enum, so the spelling only matters to
+someone reading the log. A colour saved under a name the palette no longer has
+(any of the old thirteen) boots as Fuschia.
 
 ## Changing the voice by asking
 

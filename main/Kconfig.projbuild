@@ -714,6 +714,19 @@ menu "Deepgram Agent Device"
             host/shot2png.py. Then hands back to the face. Costs 434 kB of
             PSRAM for the capture copy.
 
+    config UI_ECHO_SELFTEST
+        bool "Echo screen self-test (bench only)"
+        depends on ECHO
+        default n
+        help
+            BENCH AID, NOT A FEATURE. Ten seconds after boot, opens Echo and
+            plays it through the same hit test a finger uses: GO, two rounds
+            repeated right, a wrong press at level 3. Prints captures of GO, a
+            step lit, the wait for the callout, the player's turn and game over
+            over serial for host/shot2png.py. Then asks for the level 12 and
+            level 17 callouts outright, so the teasing and snarky replies are in
+            the log. Stays on game over. Costs 434 kB of PSRAM for the copy.
+
     config POWER_STATE_WALK
         bool "Power walk: hold each device state for the meter (bench only)"
         default n
@@ -834,67 +847,47 @@ menu "Deepgram Agent Device"
 
     choice UI_DEFAULT_ORB_COLOR_CHOICE
         prompt "Default orb colour"
-        default UI_DEFAULT_ORB_COLOR_WHITE
+        default UI_DEFAULT_ORB_COLOR_FUSCHIA
         help
             What colour the orb's dots boot as until one is chosen. Any of these
-            can be asked for at runtime ("change the colour to teal") or picked
+            can be asked for at runtime ("change the colour to blue") or picked
             on the touch panel, and the last one chosen is saved and booted in
             from then on, so this only picks the out-of-box look.
 
             Named colours rather than a raw hex on purpose: every colour the
             device can boot in is then also one the agent can be asked to return
             to. A hex here could ship a board whose default has no name, and
-            "put it back to normal" would have nothing to reach for.
+            "put it back to normal" would have nothing to reach for. The agent
+            is told index 0, Fuschia, is the default whatever is chosen here.
 
             Affects the orb only. The spectrum colours its bands by frequency and
             by which half of the conversation is live, so it ignores this.
 
-        config UI_DEFAULT_ORB_COLOR_WHITE
-            bool "White -- the monochrome shell, and the rasteriser's identity"
-        config UI_DEFAULT_ORB_COLOR_VIRA
-            bool "Vira -- soft peach-coral"
-        config UI_DEFAULT_ORB_COLOR_TOMATO
-            bool "Tomato -- warm red"
-        config UI_DEFAULT_ORB_COLOR_ORANGE
-            bool "Orange"
-        config UI_DEFAULT_ORB_COLOR_YELLOW
-            bool "Yellow"
-        config UI_DEFAULT_ORB_COLOR_LIME
-            bool "Lime -- sharp yellow-green"
-        config UI_DEFAULT_ORB_COLOR_GREEN
-            bool "Green"
-        config UI_DEFAULT_ORB_COLOR_TEAL
-            bool "Teal -- vivid aqua"
-        config UI_DEFAULT_ORB_COLOR_CYAN
-            bool "Cyan"
-        config UI_DEFAULT_ORB_COLOR_BLUE
-            bool "Blue"
-        config UI_DEFAULT_ORB_COLOR_INDIGO
-            bool "Indigo -- blue-violet"
-        config UI_DEFAULT_ORB_COLOR_PURPLE
-            bool "Purple"
-        config UI_DEFAULT_ORB_COLOR_PINK
-            bool "Pink"
+        config UI_DEFAULT_ORB_COLOR_FUSCHIA
+            bool "Fuschia -- magenta, the palette's primary"
+        config UI_DEFAULT_ORB_COLOR_CLAY
+            bool "Clay -- red"
+        config UI_DEFAULT_ORB_COLOR_BAKELITE
+            bool "Bakelite -- orange"
+        config UI_DEFAULT_ORB_COLOR_BRASS
+            bool "Brass -- yellow"
+        config UI_DEFAULT_ORB_COLOR_PHOSPHOR
+            bool "Phosphor -- green"
+        config UI_DEFAULT_ORB_COLOR_GLASS
+            bool "Glass -- blue"
+        config UI_DEFAULT_ORB_COLOR_LED
+            bool "Led -- purple"
     endchoice
 
     config UI_DEFAULT_ORB_COLOR
         int
-        default 0 if UI_DEFAULT_ORB_COLOR_WHITE
-        default 1 if UI_DEFAULT_ORB_COLOR_VIRA
-        default 2 if UI_DEFAULT_ORB_COLOR_TOMATO
-        default 3 if UI_DEFAULT_ORB_COLOR_ORANGE
-        default 4 if UI_DEFAULT_ORB_COLOR_YELLOW
-        default 5 if UI_DEFAULT_ORB_COLOR_LIME
-        default 6 if UI_DEFAULT_ORB_COLOR_GREEN
-        default 7 if UI_DEFAULT_ORB_COLOR_TEAL
-        default 8 if UI_DEFAULT_ORB_COLOR_CYAN
-        default 9 if UI_DEFAULT_ORB_COLOR_BLUE
-        default 10 if UI_DEFAULT_ORB_COLOR_INDIGO
-        default 11 if UI_DEFAULT_ORB_COLOR_PURPLE
-        default 12 if UI_DEFAULT_ORB_COLOR_PINK
-        help
-            Index into the colour table in orb_colors.c. Set by the choice above,
-            and ORDER IS THE CONTRACT -- these have to match that table.
+        default 0 if UI_DEFAULT_ORB_COLOR_FUSCHIA
+        default 1 if UI_DEFAULT_ORB_COLOR_CLAY
+        default 2 if UI_DEFAULT_ORB_COLOR_BAKELITE
+        default 3 if UI_DEFAULT_ORB_COLOR_BRASS
+        default 4 if UI_DEFAULT_ORB_COLOR_PHOSPHOR
+        default 5 if UI_DEFAULT_ORB_COLOR_GLASS
+        default 6 if UI_DEFAULT_ORB_COLOR_LED
 
     config ORB_AMP_GAIN_MIC
         int "Display level gain, microphone path (percent)"
@@ -1090,6 +1083,23 @@ menu "Deepgram Agent Device"
 
             Off removes all of it, tools included -- a tool that can only ever
             answer "no clock" is worse than no tool.
+
+    config ECHO
+        bool "Echo memory game"
+        depends on CLOCK
+        default y
+        help
+            A Echo game on the panel: four quarter buttons in the colour
+            palette's Phosphor, Clay, Brass and Glass, each with its own tone. Each
+            round adds a step to the sequence, and between rounds the agent
+            calls out the new level -- encouraging to level 9, teasing to 14,
+            snarky past that. Reached by a sideways swipe on from the stopwatch
+            screen, or by asking (the play_echo tool). While it is up the
+            microphone is held, the callouts are kept out of the conversation
+            history, and a session is started if none is running. The best
+            level is kept in NVS (echo_best).
+
+            Needs CLOCK: the swipe that reaches it starts on the orb clock.
 
     config CLOCK_RTC
         bool "Use a PCF85063 RTC at 0x51"

@@ -260,6 +260,43 @@ static int s_inject_tries;
 static esp_timer_handle_t s_inject_retry;
 
 /*
+ * A NUDGE: words put in the user's mouth -- InjectUserMessage, so the agent
+ * answers them in its own words. Echo's level callouts, and only those today.
+ *
+ * Its own slot rather than the announcement's, because the two differ in
+ * everything that slot is careful about. A nudge is only worth sending into the
+ * session that is up now, so it is never the greeting, never waits out a
+ * reconnect, and is never retried: a refused level callout is stale by the time
+ * a retry could land, and Echo goes on without it after ECHO_SPEAK_WAIT_MS.
+ * One deep, the latest wins. Sent by keepalive_task, for the reason the
+ * announcement is (see above).
+ */
+#define NUDGE_MAX        128
+static char s_nudge[NUDGE_MAX];      /* under s_announce_lock; "" when empty */
+/* Whether the last inject sent was a nudge: InjectionRefused does not say
+ * which it refuses, and a nudge refused must not re-queue an announcement. */
+static volatile bool s_nudge_last;
+/*
+ * A nudge sent and its reply not yet seen. Echo can close in between, letting
+ * the history hold go, and the server's echo of the nudge and the agent's
+ * callout would then be stored as conversation. So they are held until the
+ * reply's ConversationText, a refusal or the socket closing -- or NUDGE_TAIL_MS,
+ * since AgentAudioDone is no marker on this stack (see main.c). A turn the user
+ * speaks inside that tail is lost to the history with it.
+ */
+#define NUDGE_TAIL_MS    10000
+static volatile bool s_nudge_inflight;
+static volatile uint32_t s_nudge_sent_ms;
+/*
+ * Held while Echo is up: ConversationText is neither kept in the history nor
+ * counted as a user turn. A callout is not conversation, and without this a
+ * game's worth fills the replay budget (HISTORY_REPLAY_BYTES) and comes back in
+ * the next session as though the user had said it. Not s_history_frozen, which
+ * the forget flow owns and SettingsApplied releases.
+ */
+static volatile bool s_history_hold;
+
+/*
  * The conversation so far, replayed into the next session's Settings so that
  * reopening the socket resumes it rather than restarting it -- and persisted by
  * history_store.c so that a reboot does the same.
@@ -1128,6 +1165,56 @@ static void announce_put(const char *text)
     portEXIT_CRITICAL(&s_announce_lock);
 }
 
+/* Take the nudge out of its slot, if there is one. */
+static bool nudge_take(char *out)
+{
+    portENTER_CRITICAL(&s_announce_lock);
+    const bool have = s_nudge[0] != '\0';
+    if (have) {
+        memcpy(out, s_nudge, NUDGE_MAX);
+        s_nudge[0] = '\0';
+    }
+    portEXIT_CRITICAL(&s_announce_lock);
+    return have;
+}
+
+static bool nudge_pending(void)
+{
+    return s_nudge[0] != '\0';   /* a byte read; the take is under the lock */
+}
+
+void dg_agent_nudge(const char *text)
+{
+    if (text == NULL || text[0] == '\0') {
+        return;
+    }
+    if (!s_ready || s_keepalive_task == NULL) {
+        ESP_LOGI(TAG, "EVT nudge dropped (no session)");
+        return;
+    }
+    portENTER_CRITICAL(&s_announce_lock);
+    strlcpy(s_nudge, text, sizeof(s_nudge));
+    portEXIT_CRITICAL(&s_announce_lock);
+    xTaskNotifyGive(s_keepalive_task);
+}
+
+void dg_agent_nudge_cancel(void)
+{
+    portENTER_CRITICAL(&s_announce_lock);
+    s_nudge[0] = '\0';
+    portEXIT_CRITICAL(&s_announce_lock);
+}
+
+static bool nudge_tail(void)
+{
+    return s_nudge_inflight && ms_now() - s_nudge_sent_ms < NUDGE_TAIL_MS;
+}
+
+void dg_agent_history_hold(bool hold)
+{
+    s_history_hold = hold;
+}
+
 static void inject_retry_cb(void *arg)
 {
     (void)arg;
@@ -1176,25 +1263,32 @@ void dg_agent_announce(const char *text)
 }
 
 /*
- * {"type":"InjectAgentMessage","behavior":"queue","message":"..."} into `out`,
+ * The JSON either inject opens with, up to the opening quote of its text.
+ *
+ * "queue" on the announcement rather than the default: the default is refused
+ * while the agent is mid-turn as well as the user, and an alarm landing in the
+ * middle of a reply should wait for it, not bounce. A nudge takes no behavior;
+ * InjectUserMessage has none.
+ */
+static const char INJECT_AGENT_HEAD[] =
+    "{\"type\":\"InjectAgentMessage\",\"behavior\":\"queue\",\"message\":\"";
+static const char INJECT_USER_HEAD[] = "{\"type\":\"InjectUserMessage\",\"content\":\"";
+
+/*
+ * `head`, `msg` escaped, and the close, into `out`,
  * by hand rather than through cJSON: this runs on keepalive_task's 3 kB stack,
  * where printf-family formatting and cJSON's printer are both more frame than
  * a fixed string needs. The message is escaped; a label is whatever the user
  * said, and a quote in it must not end the JSON string.
- *
- * "queue" rather than the default: the default is refused while the agent is
- * mid-turn as well as the user, and an alarm landing in the middle of a reply
- * should wait for it, not bounce.
  */
-static size_t build_inject(const char *msg, char *out, size_t cap)
+static size_t build_inject(const char *head, const char *msg, char *out, size_t cap)
 {
-    static const char HEAD[] = "{\"type\":\"InjectAgentMessage\",\"behavior\":\"queue\",\"message\":\"";
     static const char TAIL[] = "\"}";
-    size_t n = sizeof(HEAD) - 1;
+    size_t n = strlen(head);
     if (cap < n + sizeof(TAIL)) {
         return 0;
     }
-    memcpy(out, HEAD, n);
+    memcpy(out, head, n);
     for (const char *p = msg; *p; p++) {
         const bool esc = (*p == '"' || *p == '\\');
         if (n + (esc ? 2 : 1) + sizeof(TAIL) > cap) {
@@ -2150,6 +2244,25 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+#if CONFIG_ECHO
+        if (strcmp(name->valuestring, "play_echo") == 0) {
+            cJSON *sargs = function_args(fn);
+            cJSON_Delete(sargs);
+            /* At once, not on AgentAudioDone like the display test: nothing is
+             * stopped, so nothing can cut the reply off, and the game waits for
+             * a tap on GO anyway. */
+            const bool shown = s_cb.on_echo_required != NULL &&
+                               s_cb.on_echo_required(s_cb.ctx);
+            ESP_LOGI(TAG, "EVT echo requested%s", shown ? "" : " (screen busy)");
+            send_function_response(id->valuestring, name->valuestring,
+                                   shown ? "Echo is on the screen. Tell the user to tap GO, "
+                                           "briefly."
+                                         : "Echo can't open right now; the screen is busy. "
+                                           "Tell the user briefly.");
+            continue;
+        }
+#endif
+
         if (strcmp(name->valuestring, "start_display_test") == 0) {
             /*
              * No arguments, but parse-and-free anyway: the model sometimes sends
@@ -2268,6 +2381,18 @@ static const char *const CLOCK_TOOLS[] = {
     "\"parameters\":{\"type\":\"object\",\"properties\":{\"cancel\":{\"type\":"
     "\"string\"},\"stopwatch\":{\"type\":\"string\"}}}}",
 };
+
+#if CONFIG_ECHO
+/*
+ * The Echo game, as one raw reference like the clock's tools and for their
+ * reasons -- and as short. No parameters: the level callouts that follow are
+ * nudges (dg_agent_nudge()), which carry their own instructions, so the prompt
+ * and Settings pay only for this line.
+ */
+static const char ECHO_TOOL[] =
+    "{\"name\":\"play_echo\",\"description\":\"Open the Echo memory game.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{}}}";
+#endif
 
 /*
  * A raw node that REFERENCES the string instead of copying it. cJSON has no
@@ -2743,6 +2868,9 @@ static esp_err_t send_settings(void)
         add_raw_reference(functions, CLOCK_TOOLS[i]);
     }
 #endif
+#if CONFIG_ECHO
+    add_raw_reference(functions, ECHO_TOOL);
+#endif
 
     /* Omitting agent.speak entirely would also get Flux with flux-kit-en, but
      * being explicit keeps the voice configurable. */
@@ -2873,10 +3001,18 @@ static void handle_json(const char *json, int len)
              * confirmation unanswerable -- the device would ask forever. It is a
              * fact about the conversation, not about the arena.
              */
-            if (strcmp(role->valuestring, "user") == 0) {
-                s_user_turns++;
+            if (s_history_hold || nudge_tail()) {
+                /* Echo's callouts: said, shown, and forgotten. See s_history_hold
+                 * and s_nudge_inflight. */
+            } else {
+                if (strcmp(role->valuestring, "user") == 0) {
+                    s_user_turns++;
+                }
+                history_add(role->valuestring, content->valuestring);
             }
-            history_add(role->valuestring, content->valuestring);
+            if (s_nudge_inflight && strcmp(role->valuestring, "assistant") == 0) {
+                s_nudge_inflight = false;   /* the reply: the tail is over */
+            }
             if (s_cb.on_conversation_text) {
                 s_cb.on_conversation_text(role->valuestring, content->valuestring, s_cb.ctx);
             }
@@ -2944,8 +3080,12 @@ static void handle_json(const char *json, int len)
          * moment later, a few times -- by timer, NOT on AgentAudioDone, which
          * this stack almost never sends (see main.c). Past the last try it is
          * dropped: the chime and the caption already said something happened.
+         * A nudge refused is dropped outright; see s_nudge.
          */
-        if (s_inject_tries < INJECT_RETRIES && s_injected[0] != '\0') {
+        if (s_nudge_last) {
+            s_nudge_inflight = false;
+            ESP_LOGW(TAG, "EVT nudge refused");
+        } else if (s_inject_tries < INJECT_RETRIES && s_injected[0] != '\0') {
             s_inject_tries++;
             ESP_LOGW(TAG, "EVT announce refused, retry %d/%d", s_inject_tries, INJECT_RETRIES);
             announce_put(s_injected);
@@ -3172,6 +3312,10 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
          */
         s_clear_armed_ms = 0;
         s_clear_armed_turns = 0;
+        /* A nudge is for the session that is up, and its reply will not come
+         * on the next one. See s_nudge. */
+        dg_agent_nudge_cancel();
+        s_nudge_inflight = false;
         /*
          * s_test_pending deliberately SURVIVES. The argument above -- that a
          * reconnect rebuilds the session, which is all a pending reload wanted
@@ -3284,8 +3428,9 @@ static void keepalive_task(void *arg)
 
     /* Built here, on a 3 kB stack, so not on it -- and in PSRAM, once, since
      * internal RAM is the pool this board runs out of. Escaping can at most
-     * double the message; the rest is the fixed JSON around it. */
-    enum { INJECT_LEN = ANNOUNCE_MAX * 2 + 80 };
+     * double the message; the rest is the fixed JSON around it. Sized for the
+     * longer of the two slots, the nudge. */
+    enum { INJECT_LEN = NUDGE_MAX * 2 + 80 };
     char *inject = NULL;
 
     while (1) {
@@ -3309,11 +3454,12 @@ static void keepalive_task(void *arg)
          * `continue` would skip past the lowering.
          */
         s_sending_ka = true;
-        static char msg[ANNOUNCE_MAX];
+        bool injected = false;
+        static char msg[NUDGE_MAX];   /* either slot's text; the nudge's is longer */
         /* On demand, and before the take: if PSRAM cannot spare it now, the
          * announcement stays queued for the next wake instead of being taken
          * and lost. */
-        if (inject == NULL && announce_pending()) {
+        if (inject == NULL && (announce_pending() || nudge_pending())) {
             inject = heap_caps_malloc(INJECT_LEN, MALLOC_CAP_SPIRAM);
         }
         if (inject != NULL && s_ready && esp_websocket_client_is_connected(s_client) &&
@@ -3327,12 +3473,26 @@ static void keepalive_task(void *arg)
              * uplink blocks in poll_write. Weighed and accepted, 2026-10-22;
              * if "mic= frozen, rx=0" follows an announcement, this is the lead.
              */
-            const size_t len = build_inject(msg, inject, INJECT_LEN);
+            const size_t len = build_inject(INJECT_AGENT_HEAD, msg, inject, INJECT_LEN);
             if (len > 0) {
                 /* Kept for a retry; no log here, on this stack -- the server's
                  * ConversationText echo, or InjectionRefused, is the record. */
                 memcpy(s_injected, msg, sizeof(s_injected));
+                s_nudge_last = false;
                 esp_websocket_client_send_text(s_client, inject, (int)len, SEND_TIMEOUT);
+                injected = true;
+            }
+        } else if (inject != NULL && s_ready && esp_websocket_client_is_connected(s_client) &&
+                   nudge_take(msg)) {
+            /* The announcement's send, and its risk, for the user's side. Its
+             * record is the same: the ConversationText echo. */
+            const size_t len = build_inject(INJECT_USER_HEAD, msg, inject, INJECT_LEN);
+            if (len > 0) {
+                s_nudge_last = true;
+                s_nudge_sent_ms = ms_now();
+                s_nudge_inflight = true;
+                esp_websocket_client_send_text(s_client, inject, (int)len, SEND_TIMEOUT);
+                injected = true;
             }
         } else if (!poked && s_ready && esp_websocket_client_is_connected(s_client)) {
             /*
@@ -3366,6 +3526,16 @@ static void keepalive_task(void *arg)
                 esp_websocket_client_send_text(s_client, KEEPALIVE,
                                                sizeof(KEEPALIVE) - 1, SEND_TIMEOUT);
             }
+        }
+        /*
+         * One inject a wake, and the take above cleared both slots' pokes: an
+         * announcement and a nudge queued together would leave the nudge for the
+         * keepalive period -- as long as Echo waits for its callout. So go round
+         * again for the other. Only after a send, which empties a slot, so this
+         * cannot spin.
+         */
+        if (injected && (announce_pending() || nudge_pending())) {
+            xTaskNotifyGive(s_keepalive_task);
         }
         s_sending_ka = false;
     }
@@ -3725,6 +3895,8 @@ esp_err_t dg_agent_stop(void)
     }
     s_clear_armed_ms = 0;
     s_clear_armed_turns = 0;
+    dg_agent_nudge_cancel();
+    s_nudge_inflight = false;
 
     ESP_LOGI(TAG, "session stopped");
     return ESP_OK;

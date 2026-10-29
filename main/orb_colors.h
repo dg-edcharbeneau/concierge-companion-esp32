@@ -27,11 +27,11 @@
 #include "cJSON.h"
 
 typedef struct {
-    const char *name;  /* "orange" -- what the model says, and the enum value */
+    const char *name;  /* "clay" -- the brand name: the enum value, and the
+                        * picker's big label */
     uint32_t rgb;      /* 0xRRGGBB, multiplicative on the orb's ink */
-    const char *blurb; /* what it looks like, for the function description, or
-                        * NULL when the name already says it -- every colour goes
-                        * into every session's schema, so "pink (pink)" is waste */
+    const char *plain; /* "red" -- the colour in plain words: the picker's small
+                        * label, and how the model maps what people say */
 } orb_color_t;
 
 /* How many colours exist. Index 0 is the boot default. */
@@ -40,16 +40,19 @@ size_t orb_colors_count(void);
 /* Name for an index, or NULL if out of range. */
 const char *orb_colors_name(size_t index);
 
-/* 0xRRGGBB for an index. Out of range returns white, so a bad index degrades to
- * the default look rather than to an invisible black-on-black orb. */
+/* The plain colour word for an index ("red"), or NULL if out of range. */
+const char *orb_colors_plain(size_t index);
+
+/* 0xRRGGBB for an index. Out of range returns white -- not in the palette, but a
+ * bad index then shows a plain orb rather than an invisible black-on-black one. */
 uint32_t orb_colors_rgb(size_t index);
 
-/* Case-insensitive lookup. Returns the index, or -1 if unknown. */
+/* Case-insensitive lookup by name or plain word. Returns the index, or -1. */
 int orb_colors_find(const char *name);
 
 /*
  * The colour chosen last, by voice or on the touch panel, kept in NVS by NAME
- * so a reordered catalog cannot turn someone's teal into something else. Returns
+ * so a reordered catalog cannot turn someone's glass into something else. Returns
  * its index, or -1 for none saved (or a name no longer in the catalog).
  */
 int orb_colors_saved(void);
@@ -61,7 +64,7 @@ void orb_colors_save(size_t index);
 /* Appends a JSON string array of the names, for the function schema's `enum`. */
 void orb_colors_add_enum(cJSON *parent, const char *key);
 
-/* Writes "white (the plain ...), orange (...)" for the function description,
+/* Writes "fuschia (magenta, the default), clay (red), ..." for the function description,
  * because JSON Schema has nowhere to hang a per-value note. Truncates rather
  * than overflowing. */
 void orb_colors_describe(char *out, size_t out_len);

@@ -32,7 +32,8 @@ came back to a device that greeted you as a stranger. That is the gap
 
 The timezone and any pending timers and alarms are in NVS (`dgagent/tz`,
 `dgagent/alarms`) beside the voice and volume, and survive everything the
-credentials do. A timer or one-shot alarm whose moment passed while the device
+credentials do. So does Echo's best level (`dgagent/echo_best`). Echo's level
+callouts are never in the history: see [echo.md](echo.md). A timer or one-shot alarm whose moment passed while the device
 was off still rings if it is at most ten minutes late. See
 [the clock](clock.md#timers-and-alarms).
 

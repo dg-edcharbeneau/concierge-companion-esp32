@@ -334,10 +334,10 @@ static void perform(unsigned acts)
         audio_io_chime_stop();
     }
     if (acts & ALARM_RING_HOLD_OFF) {
-        audio_io_uplink_hold(false);
+        audio_io_uplink_hold(AUDIO_HOLD_ALARM, false);
     }
     if (acts & ALARM_RING_HOLD_ON) {
-        audio_io_uplink_hold(true);
+        audio_io_uplink_hold(AUDIO_HOLD_ALARM, true);
     }
     if (acts & ALARM_RING_CHIME_ON) {
         audio_io_chime_start();

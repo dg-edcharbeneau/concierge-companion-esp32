@@ -5,8 +5,9 @@
  *
  * The UI's colours are designed in white and neutral greys (Ed's reference
  * sheets), and every one of them is derived from the orb colour by one of three
- * rules. Under white -- the default -- each rule returns its input unchanged, so
- * the out-of-box look is exactly the reference.
+ * rules. Under white each rule returns its input unchanged, so a white orb would
+ * be exactly the reference; the palette's own colours, Fuschia the default among
+ * them, re-hue it.
  *
  *   ui_tone_mul    Light things, and ink on them: white button fills, the
  *                  pressed fill, the dark ink on a white button. Per channel
@@ -25,10 +26,10 @@
 
 #include <stdint.h>
 
-/* How bright ui_tone_ink keeps text, on luma's 0..255. White, yellow, lime and
- * teal pass through; cyan and vira (181) are lifted a touch, purple (128) most.
- * Measured against the meter's fill, the darkest surface text sits on, that
- * keeps every catalog colour at 3.6:1 or better (white: 7.6). */
+/* How bright ui_tone_ink keeps text, on luma's 0..255. Brass (216) passes
+ * through; Phosphor (171) and Bakelite (150) are lifted a touch, Clay and Led
+ * (100) most. Measured against the meter's fill, the darkest surface text sits
+ * on, a floor of 190 kept every colour at 3.6:1 or better. */
 #define UI_TONE_INK_LUMA 190
 
 /* The small grey of the screen's hints and qualifiers, as designed on white. */

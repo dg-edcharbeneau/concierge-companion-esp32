@@ -100,7 +100,6 @@ static void set_palette(uint32_t tint)
 static lv_obj_t *s_canvas;
 static bool s_open;
 static panel_page_t s_page;
-static int s_color_sub;                 /* the picker's own page: 0 or 1 */
 static int s_alarm_idx;
 static uint8_t s_cancel_armed_id;       /* 0: not armed */
 static uint32_t s_cancel_armed_ms;
@@ -465,6 +464,12 @@ static void icon(lv_layer_t *L, ui_icon_t which, uint32_t rgb, int32_t x, int32_
         line(L, rgb, x - 8, y, x - 11, y - 4);
         line(L, rgb, x - 8, y, x - 4, y - 3);
         break;
+    case UI_ICON_REPLAY:
+        /* UI_ICON_RESET at the full size, for Echo's Play again. */
+        arc(L, rgb, x, y, 13, 270, 180);
+        line(L, rgb, x - 13, y, x - 18, y - 6);
+        line(L, rgb, x - 13, y, x - 7, y - 5);
+        break;
     case UI_ICON_FLAG:
         line(L, rgb, x - 6, y - 9, x - 6, y + 9);
         line(L, rgb, x - 6, y - 8, x + 7, y - 4);
@@ -568,8 +573,7 @@ static bool enabled(panel_hit_t id)
         return s_alarm_n > 0;
     default:
         if (id >= PANEL_HIT_SLOT && id <= PANEL_HIT_SLOT_LAST) {
-            return panel_color_for_slot(s_color_sub, id - PANEL_HIT_SLOT,
-                                        (int)orb_colors_count()) != -1;
+            return (size_t)(id - PANEL_HIT_SLOT) < orb_colors_count();
         }
         return false;
     }
@@ -634,52 +638,50 @@ static int color_index_of(uint32_t rgb)
     return -1;
 }
 
+/*
+ * A check on a swatch is dark on a light colour and white on a dark one, as the
+ * "Radial color picker" design draws them. Between Clay and Led (luma 100) and
+ * Glass (133), so each lands on the side the design puts it.
+ */
+#define CHECK_DARK_LUMA 120
+
 static void paint_color(lv_layer_t *L, uint32_t tint_rgb)
 {
     const int count = (int)orb_colors_count();
     const int current = color_index_of(tint_rgb);
 
-    for (int slot = 0; slot < PANEL_SLOTS; slot++) {
+    for (int i = 0; i < PANEL_SLOTS && i < count; i++) {
         float x, y;
-        panel_slot_center(slot, &x, &y);
-        const int idx = panel_color_for_slot(s_color_sub, slot, count);
-        const bool pressed = s_pressed == (panel_hit_t)(PANEL_HIT_SLOT + slot);
-        if (idx == PANEL_SLOT_IS_MORE) {
-            fill_circle(x, y, PANEL_SWATCH_R, 0.0f, pressed ? s_col.pressed : s_col.secondary);
-            const uint32_t ink = pressed ? s_col.primary_ink : s_col.text;
-            if (s_color_sub == 0) {
-                char more[16];
-                snprintf(more, sizeof(more), "+%d", count - (PANEL_SLOTS - 1));
-                text(L, &font_panel_18, ink, (int32_t)x, (int32_t)y, more);
-            } else {
-                icon(L, UI_ICON_LEFT, ink, (int32_t)x, (int32_t)y);
-            }
-        } else if (idx < 0) {
-            fill_circle(x, y, 3.0f, 0.0f, s_col.dot_off);
-        } else {
-            const uint32_t rgb = orb_colors_rgb((size_t)idx);
-            /* Pressed shrinks it a touch: the only feedback a colour can take. */
-            fill_circle(x, y, PANEL_SWATCH_R - (pressed ? 3.0f : 0.0f), 0.0f, rgb);
-            if (idx == current) {
-                fill_circle(x, y, PANEL_SWATCH_R + 6.0f, 3.0f, rgb);
-                icon(L, UI_ICON_CHECK, s_col.primary_ink, (int32_t)x, (int32_t)y);
-            }
+        panel_slot_center(i, &x, &y);
+        const bool pressed = s_pressed == (panel_hit_t)(PANEL_HIT_SLOT + i);
+        const uint32_t rgb = orb_colors_rgb((size_t)i);
+        /* Pressed shrinks it a touch: the only feedback a colour can take. */
+        fill_circle(x, y, PANEL_SWATCH_R - (pressed ? 3.0f : 0.0f), 0.0f, rgb);
+        if (i == current) {
+            fill_circle(x, y, PANEL_SWATCH_R + 6.0f, 3.0f, rgb);
+            icon(L, UI_ICON_CHECK,
+                 ui_tone_luma(rgb) >= CHECK_DARK_LUMA ? s_col.primary_ink : 0xFFFFFF,
+                 (int32_t)x, (int32_t)y);
         }
     }
 
-    /* The centre: the colour in force, by name, in itself. */
+    /* The centre: the colour in force, its name in itself, the plain colour
+     * word under it in spaced caps. */
     if (current >= 0) {
-        char name[16];
+        char name[16], plain[16];
         snprintf(name, sizeof(name), "%s", orb_colors_name((size_t)current));
         if (name[0] >= 'a' && name[0] <= 'z') {
             name[0] = (char)(name[0] - 'a' + 'A');
         }
-        text(L, &font_panel_40, tint_rgb, (int32_t)PANEL_C, (int32_t)PANEL_C, name);
-    }
-    /* The picker's own two pages. */
-    for (int i = 0; i < 2; i++) {
-        fill_circle(PANEL_C - 8.0f + 16.0f * (float)i, PANEL_C + 52.0f, 3.0f, 0.0f,
-                    i == s_color_sub ? s_col.primary : s_col.dot_off);
+        snprintf(plain, sizeof(plain), "%s", orb_colors_plain((size_t)current));
+        for (char *p = plain; *p; p++) {
+            if (*p >= 'a' && *p <= 'z') {
+                *p = (char)(*p - 'a' + 'A');
+            }
+        }
+        text(L, &font_panel_40, tint_rgb, (int32_t)PANEL_C, (int32_t)PANEL_C - 12, name);
+        text_spaced(L, &lv_font_montserrat_14, s_col.text, (int32_t)PANEL_C,
+                    (int32_t)PANEL_C + 22, 2, plain);
     }
 }
 
@@ -833,9 +835,6 @@ static uint32_t signature(uint32_t now, uint32_t tint_rgb)
     case PANEL_PAGE_SOUND:
         h ^= (uint32_t)controls_volume() << 8 ^ (uint32_t)controls_mic_gain() << 16;
         break;
-    case PANEL_PAGE_COLOR:
-        h ^= (uint32_t)s_color_sub << 24;
-        break;
     case PANEL_PAGE_TOGGLES:
         h ^= (uint32_t)controls_ns_on() << 3 ^ (uint32_t)controls_clock_12h() << 5;
         break;
@@ -893,11 +892,8 @@ static void act(panel_hit_t id)
         break;
     }
     default: {
-        const int idx = panel_color_for_slot(s_color_sub, id - PANEL_HIT_SLOT,
-                                             (int)orb_colors_count());
-        if (idx == PANEL_SLOT_IS_MORE) {
-            s_color_sub ^= 1;
-        } else if (idx >= 0) {
+        const int idx = id - PANEL_HIT_SLOT;
+        if (idx >= 0 && (size_t)idx < orb_colors_count()) {
             ESP_LOGI(TAG, "EVT ctl color %s", orb_colors_name((size_t)idx));
             ui_set_orb_color(idx);   /* applied by the frame timer; main.c saves it */
         }
@@ -923,7 +919,6 @@ static void open_panel(void)
 {
     s_open = true;
     s_pressed = PANEL_HIT_NONE;
-    s_color_sub = 0;
     s_touch_ms = now_ms();
     ESP_LOGI(TAG, "EVT panel open");
     set_page(PANEL_PAGE_SOUND);
@@ -1054,7 +1049,6 @@ static void selftest(uint32_t now, bool session_live, uint32_t tint_rgb)
     static uint32_t live_since, next_ms;
     static int step = -1;
     static int color_back;   /* the slot that holds the colour in force at the start */
-    static int color_back_sub;
     if (step == -2) {
         return;   /* done */
     }
@@ -1109,20 +1103,13 @@ static void selftest(uint32_t now, bool session_live, uint32_t tint_rgb)
     case 5: {
         set_page(PANEL_PAGE_COLOR);
         const int cur = color_index_of(tint_rgb);
-        if (!panel_slot_for_color(cur, (int)orb_colors_count(), &color_back_sub, &color_back)) {
-            color_back_sub = 0;
-            color_back = 0;
-        }
+        color_back = cur >= 0 ? cur : 0;
         break;
     }
-    case 6: tap_slot(3); break;              /* orange */
-    case 7: tap_slot(PANEL_SLOT_MORE); break;
-    case 8: tap_slot(1); break;              /* pink */
-    case 9:
-        if (s_color_sub != color_back_sub) {
-            tap_slot(PANEL_SLOT_MORE);
-        }
-        break;
+    case 6: tap_slot(2); break;              /* bakelite: a dark check */
+    case 7: tap_slot(6); break;              /* led: a white check */
+    case 8: tap_slot(1); break;              /* clay */
+    case 9: break;                           /* a beat on clay before the way back */
     case 10: tap_slot(color_back); break;    /* put it back */
     case 11: set_page(PANEL_PAGE_TOGGLES); break;
     case 12: tap(c, c - 100); break;         /* noise reduction */
@@ -1176,6 +1163,11 @@ void ui_panel_init(lv_obj_t *canvas)
 bool ui_panel_is_open(void)
 {
     return s_open;
+}
+
+bool ui_panel_opening(void)
+{
+    return s_opening;
 }
 
 int ui_panel_page(void)

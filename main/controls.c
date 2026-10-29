@@ -4,6 +4,8 @@
  */
 #include "controls.h"
 
+#include <stdio.h>
+
 #include "sdkconfig.h"
 
 #include "esp_log.h"
@@ -12,6 +14,8 @@
 
 #include "audio_io.h"
 #include "clock.h"
+#include "dg_agent.h"
+#include "echo.h"
 #include "session_ctl.h"
 
 static const char *TAG = "controls";
@@ -201,6 +205,49 @@ void controls_alarm_snooze(int minutes)
 {
     ESP_LOGI(TAG, "EVT ctl alarm snooze %d", minutes);
     alarms_snooze(minutes);
+}
+
+void controls_echo_open(bool open)
+{
+    ESP_LOGI(TAG, "EVT ctl echo %s", open ? "open" : "close");
+    if (!open) {
+        /* Before the history hold goes: a callout for a game that is over is
+         * not worth saying, and one still queued would land unheld. */
+        dg_agent_nudge_cancel();
+    }
+    audio_io_uplink_hold(AUDIO_HOLD_ECHO, open);
+    dg_agent_history_hold(open);
+    /* A flag, not a start, as an alarm asks: a no-op on a session that is up,
+     * and the start that lands once a stopping one has finished. */
+    if (open && !session_ctl_is_running()) {
+        session_ctl_request_start_soon();
+    }
+}
+
+void controls_echo_callout(int level)
+{
+    /*
+     * The agent writes the line; this says what it is for. In English whatever
+     * the voice: the prompt's language line already tells it what to answer
+     * in. "No questions" because a question invites a turn, and the player's
+     * microphone is held.
+     */
+    const char *tone = level < 10 ? "encouraging" : level < 15 ? "teasing" : "snarky";
+    char say[128];
+    snprintf(say, sizeof(say),
+             "[Echo] I just reached level %d. Call out the level in one short, %s "
+             "sentence. No questions.", level, tone);
+    dg_agent_nudge(say);
+}
+
+void controls_echo_won(void)
+{
+    ESP_LOGI(TAG, "EVT ctl echo won");
+    char say[96];
+    snprintf(say, sizeof(say),
+             "[Echo] I just beat all %d levels. Celebrate in one short sentence. No questions.",
+             ECHO_MAX);
+    dg_agent_nudge(say);
 }
 
 void controls_commit(uint32_t now_ms, uint32_t quiet_ms)

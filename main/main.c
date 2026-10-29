@@ -54,6 +54,9 @@
 #include "dg_agent.h"
 #include "session_ctl.h"
 #include "ui.h"
+#if CONFIG_ECHO
+#include "ui_echo.h"
+#endif
 #include "voices.h"
 #include "wifi_creds.h"
 #include "wifi_prov.h"
@@ -599,6 +602,16 @@ static void on_display_test_required(void *ctx)
     s_test_entry_pending = true;
 }
 
+#if CONFIG_ECHO
+/* The agent called play_echo. The session carries on -- the game wants an
+ * agent to call its levels -- so this only asks for the screen. */
+static bool on_echo_required(void *ctx)
+{
+    (void)ctx;
+    return ui_show_echo();
+}
+#endif
+
 static void on_agent_audio_done(void *ctx)
 {
     note_activity();
@@ -812,6 +825,9 @@ static const dg_agent_callbacks_t s_callbacks = {
     .on_user_started_speaking = on_user_started_speaking,
     .on_reload_required = on_reload_required,
     .on_display_test_required = on_display_test_required,
+#if CONFIG_ECHO
+    .on_echo_required = on_echo_required,
+#endif
 };
 
 /*
@@ -1228,6 +1244,29 @@ void app_main(void)
             }
         }
 
+#if CONFIG_ECHO
+        /*
+         * ECHO'S BEST, saved here for the orb colour's reason, and 2 s after a
+         * game ends rather than at once: the end is the wrong-press tone, and a
+         * flash write would stall it. The first pass takes what boot loaded.
+         */
+        {
+            static int saved = -1;
+            static uint32_t seen_ms;
+            static uint16_t seen;
+            const uint16_t best = ui_echo_best();
+            if (saved < 0) {
+                saved = seen = best;
+            } else if (best != seen) {
+                seen = best;
+                seen_ms = now_ms();
+            } else if (best != saved && (now_ms() - seen_ms) >= COLOR_SAVE_QUIET_MS) {
+                ui_echo_best_persist(best);
+                saved = best;
+            }
+        }
+#endif
+
         /*
          * CLOCK AND ALARMS. Here because everything slow they do -- applying a
          * timezone, the RTC write after a sync, the NVS write after a change,
@@ -1385,6 +1424,13 @@ void app_main(void)
              * wants to see it. Stopped or paused, it sleeps as anything else. */
             stopped_since_ms = now_ms();
             ui_set_sleep(false, false);
+#if CONFIG_ECHO
+        } else if (ui_echo_holds_awake()) {
+            /* Someone is playing Echo with no session to keep the panel up --
+             * stopped by BOOT, or never connected. */
+            stopped_since_ms = now_ms();
+            ui_set_sleep(false, false);
+#endif
         } else if (session_ctl_is_running()) {
             stopped_since_ms = 0;
             ui_set_sleep(false, false);
@@ -1594,9 +1640,14 @@ walk_skip:
         }
 
         /* Not while something rings: the user is silent through every chime by
-         * design, and the cycle needs the session for its next announcement. */
+         * design, and the cycle needs the session for its next announcement.
+         * Nor while someone plays Echo, whose microphone is held: the session
+         * is there for the level callouts, and nobody is meant to speak. */
         if (CONFIG_SESSION_IDLE_TIMEOUT_S > 0 && session_ctl_is_running() &&
             ready_now && s_activity_ms != 0 && !alarms_ringing()
+#if CONFIG_ECHO
+            && !ui_echo_holds_awake()
+#endif
 #if CONFIG_POWER_STATE_WALK
             && walk_step(now_ms()) != WALK_SESSION
 #endif

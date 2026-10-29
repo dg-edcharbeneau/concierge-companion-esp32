@@ -149,10 +149,28 @@ void audio_io_flush(void);
 void audio_io_chime_start(void);
 void audio_io_chime_stop(void);
 
+/*
+ * One tone, `hz` for `ms` (each at most 4095), cutting short any tone still
+ * sounding -- Echo's quarters. Made by the playback task exactly as the chime
+ * is, and outranked by it and by agent audio, which cuts a tone off.
+ *
+ * NOT counted by audio_io_playback_active(), which goes on meaning "the agent
+ * is speaking": Echo waits on that between levels, and its own tones must not
+ * read as the callout. One caller at a time; the LVGL task.
+ */
+void audio_io_tone(unsigned hz, unsigned ms);
+
+/* Who is holding the uplink: each holds and lets go independently, and the
+ * uplink stays withheld while any one does. */
+typedef enum {
+    AUDIO_HOLD_ALARM = 1 << 0,   /* chiming into a live session */
+    AUDIO_HOLD_ECHO = 1 << 1,   /* the game is up: the agent only calls levels */
+} audio_io_hold_t;
+
 /* Withhold the microphone uplink while `hold` -- an alarm chiming into a live
- * session, so the tone cannot reach the agent as speech. The capture path, the
- * echo canceller and the display tap carry on. Safe from any task. */
-void audio_io_uplink_hold(bool hold);
+ * session, so the tone cannot reach the agent as speech, or Echo. The capture
+ * path, the echo canceller and the display tap carry on. Safe from any task. */
+void audio_io_uplink_hold(audio_io_hold_t who, bool hold);
 
 /*
  * Deep idle (ui.c): `on` closes the speaker codec once nothing plays and the

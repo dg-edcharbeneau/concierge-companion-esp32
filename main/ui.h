@@ -225,6 +225,15 @@ void ui_bench_power(int brightness_pct, bool display_off);
 /* The stopwatch screen is up and counting: main.c holds sleep off for it. */
 bool ui_stopwatch_holds_awake(void);
 
+/* Bring the Echo screen up, as play_echo does (CONFIG_ECHO). Safe from any
+ * task: applied by the frame timer. False when it cannot open now -- an alarm,
+ * the setup QR code, the display test, or the battery-critical sleep. */
+bool ui_show_echo(void);
+
+/* Echo is up and someone has played in the last two minutes: main.c holds
+ * sleep and the session's idle timeout off for it. Any task. */
+bool ui_echo_holds_awake(void);
+
 /* audio_io_tap_t-compatible. Agent audio wins when both are active. */
 void ui_feed_agent(const int16_t *mono, size_t samples);
 void ui_feed_mic(const int16_t *mono, size_t samples);

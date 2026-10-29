@@ -35,6 +35,8 @@ idf_component_register(
         ui_paint.c
         ui_ring.c
         stopwatch.c
+        echo.c
+        ui_echo.c
         audio_rec.c
         controls.c
         panel_geom.c

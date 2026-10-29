@@ -299,7 +299,13 @@ and travels 80 px up. The session is not touched. A tap puts the face back, a
 sideways swipe goes to the stopwatch, and either way the press is swallowed
 whole, so neither can also tap the button and end a conversation that carried on
 underneath it. The stopwatch screen takes every press the same way: its two
-buttons, or a sideways swipe back to the clock.
+buttons, or a sideways swipe on to Echo, whose quarters and hub take every
+press in turn until a sideways swipe returns to the clock.
+
+Echo is the one screen that changes the session: it starts one if none is
+running, holds the microphone, and keeps its level callouts out of the history.
+A session starting does not close it, as it does the on-demand clock. See
+[echo.md](echo.md#what-it-does-to-the-conversation).
 
 ## Stopping when nobody is talking
 
@@ -320,6 +326,10 @@ a session and turn a cost-saving measure into an unattended one that bills until
 someone notices. History used to be the other detail here — kept on this path,
 cleared on a deliberate tap-to-stop — but every stop keeps it now, so the two
 paths differ only in what can trigger them.
+
+It does not run while someone is playing Echo (a press or a round in the last
+two minutes): the microphone is held then, so nobody speaks, and the session is
+there for the level callouts.
 
 Activity means an end-of-turn, Deepgram reporting the user started speaking, or
 the speaker being busy — deliberately not the local microphone level, which would

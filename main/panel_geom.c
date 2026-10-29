@@ -138,7 +138,7 @@ panel_hit_t panel_hit(panel_page_t page, float x, float y)
     }
 
     case PANEL_PAGE_COLOR:
-        /* Adjacent swatches are 85 px apart, so a slop of 8 cannot overlap two. */
+        /* Adjacent swatches are 143 px apart, so a slop of 8 cannot overlap two. */
         for (int s = 0; s < PANEL_SLOTS; s++) {
             float cx, cy;
             panel_slot_center(s, &cx, &cy);
@@ -168,31 +168,4 @@ panel_hit_t panel_hit(panel_page_t page, float x, float y)
     default:
         return PANEL_HIT_NONE;
     }
-}
-
-int panel_color_for_slot(int subpage, int slot, int color_count)
-{
-    if (slot < 0 || slot >= PANEL_SLOTS) {
-        return -1;
-    }
-    if (slot == PANEL_SLOT_MORE) {
-        return PANEL_SLOT_IS_MORE;
-    }
-    /* Eleven positions on page A: every slot but six. */
-    const int per_page = PANEL_SLOTS - 1;
-    const int k = (slot < PANEL_SLOT_MORE) ? slot : slot - 1;
-    const int index = subpage * per_page + k;
-    return (index < color_count) ? index : -1;
-}
-
-bool panel_slot_for_color(int index, int color_count, int *subpage, int *slot)
-{
-    if (index < 0 || index >= color_count) {
-        return false;
-    }
-    const int per_page = PANEL_SLOTS - 1;
-    const int k = index % per_page;
-    *subpage = index / per_page;
-    *slot = (k < PANEL_SLOT_MORE) ? k : k + 1;
-    return true;
 }

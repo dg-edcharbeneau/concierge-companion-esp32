@@ -257,7 +257,7 @@ agent's states and caption stay readable.)
 awake, with the session carrying on underneath. A tap puts the face back, and
 does nothing else; so does a session starting (a BOOT press, an alarm's
 announcement), since the face is then the point. A **sideways swipe** goes to the
-stopwatch (below). Before the first time sync the swipe up does nothing.
+stopwatch (below), and on from there to [Echo](echo.md). Before the first time sync the swipe up does nothing.
 
 What a press on the clock is gets decided on its release, not its press: a tap
 puts the face back, a sideways swipe brings the stopwatch. So a press on a
@@ -320,8 +320,8 @@ hour (centiseconds over an hour are noise). Under it, `READY`, `RUNNING` or
 `PAUSED`, or the latest lap: `LAP 1 · 11:53.36`, its number and the total time
 when it was taken. Only the latest lap is kept.
 
-**Getting there:** swipe sideways on the orb clock, asleep or swiped up, and
-sideways again to go back. Or by voice ("start a stopwatch"), which brings the
+**Getting there:** swipe sideways on the orb clock, asleep or swiped up.
+Sideways again goes on to [Echo](echo.md), and once more back to the clock. Or by voice ("start a stopwatch"), which brings the
 screen up over the conversation as the on-demand clock does.
 
 **Two round buttons**, acting on the press: the white one on the right plays and

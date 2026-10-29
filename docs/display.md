@@ -35,7 +35,7 @@ MIT. It has a vocabulary rather than a level meter:
 Amplitude scales how **deep** a gesture goes, never how fast. Driving rate from
 level is frequency modulation, and reads as vibration rather than as a voice.
 
-The dots are white by default and can be recoloured by asking — see "Changing
+The dots are Fuschia, the palette's primary, by default and can be recoloured by asking — see "Changing
 the orb's colour by asking" in [voice-commands.md](voice-commands.md).
 The colour chosen last, by voice or on the touch panel, survives a reboot;
 `CONFIG_UI_DEFAULT_ORB_COLOR` picks what it boots as until one has been chosen.
@@ -284,6 +284,15 @@ middle with its centiseconds, the latest lap under it, and two round buttons --
 play/pause, and lap/reset. It owns the frame as the clock does, at 10 fps while
 it counts. See [the clock page](clock.md#the-stopwatch).
 
+### Echo
+
+One more sideways swipe on from the stopwatch, or "let's play Echo": four
+quarter buttons in the palette's Phosphor, Clay, Brass and Glass round a hub that
+shows the level, the agent calling out each new one. It owns the frame as the
+stopwatch does, at the awake 30 fps, and takes the orb colour. While it is up the
+microphone is held and a session is kept open for the callouts. See
+[the Echo page](echo.md).
+
 ### The ring screen
 
 While a timer or alarm rings, the panel shows the ring screen instead of the
@@ -305,7 +314,7 @@ talking and the microphone keeps listening.
 | page | controls | the same as |
 |---|---|---|
 | Sound | mic gain (left) and volume (right) as linked pairs: + above, - below, and between them a bridge showing the value as a level meter, its number and its name; the button that cannot go further turns dark at a limit | `set_mic_gain`, `set_volume` |
-| Colour | the 13 orb colours on a clock face, 11 + "+2"; the one in force is ringed and named | `set_color` |
+| Colour | the 7 palette colours evenly round one dial, Fuschia at twelve; the one in force is ringed and checked (dark check on a light swatch, white on a dark one), its name in the middle in itself over the plain colour word | `set_color` |
 | Toggles | noise reduction on/off; 12-hour/24-hour | BOOT double click; `set_clock {hours}` |
 | Timers & alarms | the soonest first, one at a time, ‹ › for the rest; Cancel takes two taps | the `alarms` tool |
 
@@ -330,13 +339,14 @@ its number; mic gain's spans 6-30 dB. Colours are rounded, not truncated, to
 RGB565: truncating takes more off red and blue than green and turned those
 neutral greys green on the panel.
 
-**In the orb's colour.** Those are the colours on a white orb; on any other, the
+**In the orb's colour.** Those are the colours on a white orb, which the palette
+no longer has; on each of its colours, the
 panel and the rest of the screen wear it, by three rules in
 [main/ui_tone.h](../main/ui_tone.h). White things become the colour, and the dark
 ink on them stays dark. Dark surfaces and grey text take its hue at their own
 brightness, since a straight multiply halves it on purple or blue and the dark
 buttons vanish into the black. White text on a dark surface becomes the colour,
-lifted towards white on the darker colours (purple most) so it keeps 3.6:1 or
+lifted towards white on the darker colours (Clay and Led most) so it keeps 3.6:1 or
 better on the meter, the darkest thing text sits on. Each rule returns its input
 unchanged on white, which `host/panel.sh` checks.
 
