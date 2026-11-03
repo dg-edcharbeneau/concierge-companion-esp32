@@ -229,6 +229,34 @@ replayed audio to that key. In October it showed a 24 dB uplink with no
 detectable interruption in it, and an 18 dB one where Flux found a turn the live
 agent had not acted on.
 
+## Talking the board through language changes
+
+Speaks to the board through the Mac's speaker and checks its serial log, so a
+language change can be shown, or re-checked after a flash, without a person
+doing the talking.
+
+    host/voice_demo.sh                      Bulgarian and Spanish, from a reset
+    host/voice_demo.sh --languages fr,ja    any of es fr de hi ru pt ja it nl bg
+    host/voice_demo.sh --no-reset           the session already running
+
+For each language: "Can you speak it?" in English, a question in it, "English,
+please" in it, and a question in English. Lines are synthesised once with
+`/v2/speak` (cached in `build/voice_demo/`, with the board's log), and each is
+played only after the board has finished *playing* its last reply, because a
+line spoken over the board's own voice is lost to its echo handling. A switch
+passes when `set_voice` ran and all three updates were acknowledged, or, past
+the board's four in-place changes per session, when it reopened the session
+with the new voice. A line nobody heard is said again, and so is a change
+request that changed nothing; if the board is still in the other language
+after that, the run stops there.
+
+macOS only (`afplay`), and needs `DEEPGRAM_API_KEY` and a Python with
+`pyserial`: the script finds the ESP-IDF one. Put the board near the speaker.
+What it cannot rule out is the room: a laptop speaker across a desk is heard
+less well than a person, and in November Nova-3 `ja` lost the leading 英語 of
+"英語でお願いします" in most runs on the board, though never from the same audio
+sent straight to the API.
+
 ## Captive-portal preview
 
 Opens `main/portal.src.html` in a browser, so a wording or layout change costs a
