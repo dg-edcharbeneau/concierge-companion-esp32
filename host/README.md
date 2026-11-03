@@ -253,9 +253,11 @@ after that, the run stops there.
 macOS only (`afplay`), and needs `DEEPGRAM_API_KEY` and a Python with
 `pyserial`: the script finds the ESP-IDF one. Put the board near the speaker.
 What it cannot rule out is the room: a laptop speaker across a desk is heard
-less well than a person, and in November Nova-3 `ja` lost the leading 英語 of
-"英語でお願いします" in most runs on the board, though never from the same audio
-sent straight to the API.
+less well than a person. In November, on the board, streaming Nova-3 `ja` lost
+the leading 英語 of "英語でお願いします" in most runs. The clean synthesised
+line was always heard, and so was the board's recording sent as one file. But
+the board's recording streamed back in reproduced the loss every time, and
+whether it happens depends on what was streamed before the line.
 
 ## Captive-portal preview
 

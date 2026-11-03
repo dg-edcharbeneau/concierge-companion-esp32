@@ -281,6 +281,8 @@ def step(board, label, model, text, kind, lang_after, current, results):
             until_quiet(board, mark2)
         evs += board.since(mark2)
         row["voice"] = next((a for k, a in evs if k == "voice"), None)
+        # The confirmation that counts is the one after the second ask.
+        row["answered"] = any(k == "said" for k, _ in board.since(mark2))
 
     if kind == "switch" and row["voice"] and any(k == "reload" for k, _ in board.since(mark)):
         # After INPLACE_CHANGES_MAX changes in one session (main/dg_agent.c),
