@@ -60,8 +60,18 @@ with it stopped, the game carries on without callouts.
 At each level up, `controls_echo_callout()` hands the agent a line as if the
 user had said it: `InjectUserMessage`, through `dg_agent_nudge()`. For example:
 
-> [Echo] I just reached level 12. Call out the level in one short, teasing
-> sentence. No questions.
+> [Echo] Reached 12. One short, teasing line like a weather report. No
+> questions.
+
+**Each callout gets a shape,** dealt from a shuffled deck of ten so none comes
+round again until all have: a build-up that lands on the number last, a mock
+headline, a sports commentator, a pun on the number, a dare for the next round,
+and so on. Asked the same way every level, the agent copies its own last
+callout. Against the Agent API with the device's prompt, levels 2 to 17 all came
+back "Level N, nice, …": "you're rolling now", "good momentum". A persona alone
+changed the words but kept the frame, and "don't open with the number" was
+ignored within a few levels. Naming where the number goes, or how the line
+opens, is what broke it.
 
 The instruction travels in the message, so the system prompt and `Settings`
 carry nothing for it; the tool itself adds 113 B to `Settings`. The request is in

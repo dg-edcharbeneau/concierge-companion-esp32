@@ -9,6 +9,7 @@
 #include "sdkconfig.h"
 
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 
@@ -224,19 +225,61 @@ void controls_echo_open(bool open)
     }
 }
 
+/*
+ * A SHAPE FOR EACH CALLOUT. Asked the same way every level, the agent copies its
+ * own last callout: against the Agent API with the device's prompt, levels 2 to
+ * 17 all came back "Level N, nice, ..." -- "you're rolling now", "good
+ * momentum". A persona alone ("like mission control") changed the words but
+ * not the frame, "Echo level N... quip", and "don't open with the number" was
+ * ignored by level 6. Naming where the number goes, or how the line opens,
+ * breaks the frame. Dealt from a shuffled deck, so none comes round again
+ * until all have.
+ */
+static const char *const CALLOUT_SHAPES[] = {
+    "that builds up and lands on the number last",
+    "that opens with a sound like whoa or ooh",
+    "as a mock news headline",
+    "like a sports commentator",
+    "as dry understatement, the number at the end",
+    "that opens with a silly title for them",
+    "with a pun on the number",
+    "like a weather report",
+    "that dares them to beat the next round",
+    "like a game-show host",
+};
+#define CALLOUT_SHAPES_N (sizeof(CALLOUT_SHAPES) / sizeof(CALLOUT_SHAPES[0]))
+
+static const char *deal_shape(void)
+{
+    static uint8_t deck[CALLOUT_SHAPES_N];
+    static size_t left;
+    if (left == 0) {
+        for (size_t i = 0; i < CALLOUT_SHAPES_N; i++) {
+            deck[i] = (uint8_t)i;
+        }
+        for (size_t i = CALLOUT_SHAPES_N - 1; i > 0; i--) {
+            const size_t j = esp_random() % (i + 1);
+            const uint8_t t = deck[i];
+            deck[i] = deck[j];
+            deck[j] = t;
+        }
+        left = CALLOUT_SHAPES_N;
+    }
+    return CALLOUT_SHAPES[deck[--left]];
+}
+
 void controls_echo_callout(int level)
 {
     /*
      * The agent writes the line; this says what it is for. In English whatever
      * the voice: the prompt's language line already tells it what to answer
      * in. "No questions" because a question invites a turn, and the player's
-     * microphone is held.
+     * microphone is held. The longest is 105 B, inside the nudge's 127.
      */
     const char *tone = level < 10 ? "encouraging" : level < 15 ? "teasing" : "snarky";
     char say[128];
-    snprintf(say, sizeof(say),
-             "[Echo] I just reached level %d. Call out the level in one short, %s "
-             "sentence. No questions.", level, tone);
+    snprintf(say, sizeof(say), "[Echo] Reached %d. One short, %s line %s. No questions.", level,
+             tone, deal_shape());
     dg_agent_nudge(say);
 }
 

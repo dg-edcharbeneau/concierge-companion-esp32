@@ -60,7 +60,8 @@ void controls_alarm_snooze(int minutes);
  * so there is an agent to call the levels; closing drops a callout not yet
  * sent and lets both holds go. The callout asks the agent for one line on
  * reaching `level`, in the tone for it: encouraging to 9, teasing to 14, snarky
- * past that. Neither writes flash.
+ * past that, and in a shape dealt from a shuffled deck so the lines do not all
+ * come out alike. LVGL task. Neither writes flash.
  */
 void controls_echo_open(bool open);
 void controls_echo_callout(int level);
