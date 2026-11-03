@@ -62,11 +62,14 @@
 #include "ui_face.h"
 #include "ui_clock.h"
 #include "ui_ring.h"
+#if CONFIG_ECHO
+#include "ui_echo.h"
+#endif
 #include "controls.h"
 #include "ui_panel.h"
 #include "ui_tone.h"
 #if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW || \
-    CONFIG_UI_RING_SELFTEST || CONFIG_UI_STOPWATCH_SELFTEST
+    CONFIG_UI_RING_SELFTEST || CONFIG_UI_STOPWATCH_SELFTEST || CONFIG_UI_ECHO_SELFTEST
 #include "screenshot.h"
 #endif
 
@@ -579,6 +582,15 @@ static bool s_ring_shown;        /* the ring screen owns the frame */
 static bool s_sw_shown;
 static volatile bool s_sw_want;  /* ui_show_stopwatch(), from any task */
 static int s_sw_pressed = -1;    /* the button showing pressed, 0 left, 1 right */
+/*
+ * THE ECHO SCREEN: one more sideways swipe on from the stopwatch, or by voice;
+ * the swipe after it returns to the clock. Unlike the stopwatch the game lives
+ * here, so it opens when this goes up and is abandoned when it comes down --
+ * see ui_echo.h for what opening it holds. LVGL task only, apart from the
+ * request flag.
+ */
+static bool s_echo_shown;
+static volatile bool s_echo_want;   /* ui_show_echo(), from any task */
 static uint32_t s_sw_pressed_ms;
 #define SW_PRESSED_MS 150
 /* A press that began on the clock or the stopwatch screen: what it becomes --
@@ -1310,6 +1322,29 @@ bool ui_stopwatch_holds_awake(void)
     return s_sw_shown && sw_running();
 }
 
+#if CONFIG_ECHO
+/* The frame timer's own test, below, read from another task: a frame stale at
+ * worst, which costs one reply that says Echo opened when it did not. */
+static bool echo_can_show(void)
+{
+    return s_clock_ok && !s_ringing && !s_test_active && s_qr_payload == NULL && !s_sleep_dim;
+}
+
+bool ui_show_echo(void)
+{
+    if (!echo_can_show()) {
+        return false;
+    }
+    s_echo_want = true;
+    return true;
+}
+
+bool ui_echo_holds_awake(void)
+{
+    return s_echo_shown && ui_echo_recent((uint32_t)(esp_timer_get_time() / 1000));
+}
+#endif
+
 void ui_set_ring(const ui_ring_t *ring)
 {
     portENTER_CRITICAL(&s_ring_lock);
@@ -1753,6 +1788,13 @@ static bool clock_wanted(uint32_t now)
     if (s_sw_shown && (cancel || s_ringing || s_test_active || s_qr_payload != NULL ||
                        (s_asleep && !sw_running()))) {
         s_sw_shown = false;
+        set_frame_period();
+    }
+    /* Echo goes for the same, but NOT for a session starting: it starts one
+     * itself, for an agent to call the levels. Sleep comes only once nobody has
+     * played for a while (ui_echo_holds_awake()). */
+    if (s_echo_shown && (s_ringing || s_test_active || s_qr_payload != NULL || s_asleep)) {
+        s_echo_shown = false;
         set_frame_period();
     }
     /*
@@ -3010,10 +3052,38 @@ static void frame_timer_cb(lv_timer_t *timer)
         s_sw_want = false;
         if (s_clock_ok) {
             s_sw_shown = true;
+            s_echo_shown = false;
             s_clock_forced = false;
             ESP_LOGI(TAG, "EVT stopwatch shown");
         }
     }
+#if CONFIG_ECHO
+#if CONFIG_UI_ECHO_SELFTEST
+    {
+        static bool opened;
+        if (!opened && now_ms >= 10000) {
+            opened = true;
+            s_echo_want = true;
+            ESP_LOGI(TAG, "EVT echo selftest open");
+        }
+    }
+#endif
+    if (s_echo_want) {
+        s_echo_want = false;
+        if (echo_can_show()) {
+            s_echo_shown = true;
+            s_sw_shown = false;
+            s_clock_forced = false;
+            /* Asked for out loud is asked to be seen: awake, as a touch wakes
+             * it, or clock_wanted() closes it again on this frame. And at
+             * Echo's rate, not the clock's or the stopwatch's. */
+            s_sleep_want = false;
+            apply_sleep(false);
+            set_frame_period();
+            ESP_LOGI(TAG, "EVT echo shown");
+        }
+    }
+#endif
     const bool ring_up = !s_test_active && s_qr_payload == NULL && ui_ring_wanted(&ring);
     const bool panel = ui_panel_frame(now_ms, s_tint_rgb, s_session_live);
     /* The order decides, though little overlaps: the panel cannot be open
@@ -3021,30 +3091,54 @@ static void frame_timer_cb(lv_timer_t *timer)
      * for the ring, the QR code and the test. */
     const bool clock_now = clock_wanted(now_ms);
     const bool sw_up = !ring_up && !panel && s_sw_shown && s_clock_ok;
-    const bool clock = !panel && !ring_up && !sw_up && clock_now;
-    static bool s_sw_up;
+#if CONFIG_ECHO
+    /* The game's lifetime follows the screen being WANTED, not owning this
+     * frame: the panel opened over it pauses the painting, not the game. */
+    static bool s_echo_open;
+    if (s_echo_shown != s_echo_open) {
+        s_echo_open = s_echo_shown;
+        if (s_echo_open) {
+            ui_echo_enter(now_ms);
+        } else {
+            ui_echo_close();
+        }
+    }
+    const bool echo_up = !ring_up && !panel && !sw_up && s_echo_shown && s_clock_ok;
+#else
+    const bool echo_up = false;
+#endif
+    const bool clock = !panel && !ring_up && !sw_up && !echo_up && clock_now;
+    static bool s_sw_up, s_echo_up;
     if (panel != s_panel_shown || clock != s_clock_shown || ring_up != s_ring_shown ||
-        sw_up != s_sw_up) {
-        const bool was_taken = s_panel_shown || s_clock_shown || s_ring_shown || s_sw_up;
+        sw_up != s_sw_up || echo_up != s_echo_up) {
+        const bool was_taken = s_panel_shown || s_clock_shown || s_ring_shown || s_sw_up ||
+                               s_echo_up;
         if (s_ring_shown && !ring_up) {
             ui_ring_leave();
         }
+#if CONFIG_ECHO
+        if (s_echo_up && !echo_up) {
+            /* Black for the face; the panel or the ring paint over it anyway. */
+            ui_echo_leave(!panel && !ring_up && !clock && !sw_up);
+        }
+#endif
         if ((s_clock_shown && !clock) || (s_sw_up && !sw_up) || (clock && s_sw_up) ||
             (sw_up && s_clock_shown)) {
             /* The clock and the stopwatch share a painter: one handing over to
              * the other restarts it, and to anything else blacks the canvas for
              * the face -- unless the panel or the ring took over, having
              * already painted the whole canvas this frame. */
-            ui_clock_leave(!panel && !ring_up && !clock && !sw_up);
+            ui_clock_leave(!panel && !ring_up && !clock && !sw_up && !echo_up);
         }
         s_panel_shown = panel;
         s_clock_shown = clock;
         s_sw_up = sw_up;
+        s_echo_up = echo_up;
         if (ring_up != s_ring_shown) {
             s_ring_shown = ring_up;
             set_frame_period();
         }
-        if ((panel || clock || ring_up || sw_up) && !was_taken) {
+        if ((panel || clock || ring_up || sw_up || echo_up) && !was_taken) {
             /* Painted over everything, so no overlay's record of what it last
              * drew is true any more; each draws afresh once it is gone.
              * update_status_shown() puts the status word back on the first
@@ -3060,7 +3154,7 @@ static void frame_timer_cb(lv_timer_t *timer)
             s_arc_shown = NULL;
         }
 #if CONFIG_UI_SHOW_INDICATORS
-        if (panel || clock || ring_up || sw_up) {
+        if (panel || clock || ring_up || sw_up || echo_up) {
             lv_obj_add_flag(hint_label, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(hint_label, LV_OBJ_FLAG_HIDDEN);
@@ -3078,6 +3172,13 @@ static void frame_timer_cb(lv_timer_t *timer)
         tlm_accumulate_frame(draw_start_us);
         return;
     }
+#if CONFIG_ECHO
+    if (echo_up) {
+        ui_echo_frame(now_ms, s_tint_rgb);
+        tlm_accumulate_frame(draw_start_us);
+        return;
+    }
+#endif
     if (panel) {
         tlm_accumulate_frame(draw_start_us);
         return;
@@ -3289,7 +3390,7 @@ static void gesture_event_cb(lv_event_t *e)
         }
         apply_sleep(false);
         set_frame_period();
-        if (on_clock || s_sw_shown) {
+        if (on_clock || s_sw_shown || s_echo_shown) {
             s_press_in_button = false;
             s_press_active = false;
             s_screen_press = true;
@@ -3303,6 +3404,20 @@ static void gesture_event_cb(lv_event_t *e)
                     s_screen_press = false;   /* a button press is not a swipe */
                 }
             }
+#if CONFIG_ECHO
+            /*
+             * Echo's act on the press too, but the press stays a candidate
+             * swipe: the quarters cover nearly the whole screen, so a swipe
+             * that could not start on one could not start anywhere. A swipe
+             * out abandons the game, so the press it began with does not
+             * matter. A press in the panel's top band is the panel's, though:
+             * it may become the drag that opens it, which is no move.
+             */
+            if (s_echo_shown && !on_clock && !ui_panel_opening()) {
+                ui_echo_pressed(s_screen_x0, s_screen_y0,
+                                 (uint32_t)(esp_timer_get_time() / 1000));
+            }
+#endif
             break;
         }
         /*
@@ -3416,8 +3531,19 @@ static void gesture_event_cb(lv_event_t *e)
             if (s_sw_shown) {
                 if (swipe) {
                     s_sw_shown = false;
+#if CONFIG_ECHO
+                    s_echo_shown = true;
+                    ESP_LOGI(TAG, "EVT stopwatch -> echo");
+#else
                     s_clock_forced = true;
                     ESP_LOGI(TAG, "EVT stopwatch -> clock");
+#endif
+                }
+            } else if (s_echo_shown) {
+                if (swipe) {
+                    s_echo_shown = false;
+                    s_clock_forced = true;
+                    ESP_LOGI(TAG, "EVT echo -> clock");
                 }
             } else if (s_clock_forced) {
                 if (swipe && s_clock_ok) {
@@ -3783,13 +3909,12 @@ static esp_err_t build_ui(void)
     lv_obj_add_event_cb(scr, gesture_event_cb, LV_EVENT_LONG_PRESSED, NULL);
 
     /* The colour it was left in, else the Kconfig default. Not a static
-     * initialiser because both are lookups; orb_colors_rgb() returns white for an
-     * out-of-range index, so a Kconfig list that has drifted out of step with the
-     * table degrades to the default look. */
+     * initialiser because both are lookups. A Kconfig list that has drifted out
+     * of step with the table falls back to index 0, the default. */
     const int saved_color = orb_colors_saved();
     s_color_index = saved_color >= 0 ? saved_color : CONFIG_UI_DEFAULT_ORB_COLOR;
     if (s_color_index < 0 || (size_t)s_color_index >= orb_colors_count()) {
-        s_color_index = 0;   /* white: what orb_colors_rgb() would show anyway */
+        s_color_index = 0;   /* fuchsia, the palette's default */
     }
     s_tint_rgb = orb_colors_rgb((size_t)s_color_index);
     apply_tint();
@@ -3798,8 +3923,11 @@ static esp_err_t build_ui(void)
     pm_awake(true);   /* the panel starts awake */
     s_clock_ok = ui_clock_init(canvas_obj);
     ui_ring_init(canvas_obj);
+#if CONFIG_ECHO
+    ui_echo_init(canvas_obj);
+#endif
 #if CONFIG_UI_SCREENSHOT_TOUR || CONFIG_UI_PANEL_SELFTEST || CONFIG_UI_CLOCK_PREVIEW || \
-    CONFIG_UI_RING_SELFTEST || CONFIG_UI_STOPWATCH_SELFTEST
+    CONFIG_UI_RING_SELFTEST || CONFIG_UI_STOPWATCH_SELFTEST || CONFIG_UI_ECHO_SELFTEST
     screenshot_init();
 #endif
 

@@ -22,6 +22,10 @@ is to hand.
 | panel | 100 %, ~30 fps | 100 %, ~30 fps | 100 % at 5 fps, **40 % after 2 min, off after 5** |
 | deep idle | -- | -- | **once the panel is off: light sleep** (below) |
 
+[Echo](echo.md) holds the panel awake, and suspends the session's idle timeout,
+while someone is playing: a press or a round in the last two minutes. Then it
+sleeps as anything else does, and sleep closes the game.
+
 ## The measures
 
 **The CPU scales** (`CONFIG_PM_ENABLE`, `esp_pm_configure` in `main.c`). Two

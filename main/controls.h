@@ -55,6 +55,20 @@ void controls_alarm_stop(void);
 void controls_alarm_snooze(int minutes);
 
 /*
+ * Echo (CONFIG_ECHO). Opening it holds the microphone uplink and keeps the
+ * conversation out of the history, and starts a session if none is running,
+ * so there is an agent to call the levels; closing drops a callout not yet
+ * sent and lets both holds go. The callout asks the agent for one line on
+ * reaching `level`, in the tone for it: encouraging to 9, teasing to 14, snarky
+ * past that, and in a shape dealt from a shuffled deck so the lines do not all
+ * come out alike. LVGL task. Neither writes flash.
+ */
+void controls_echo_open(bool open);
+void controls_echo_callout(int level);
+/* The same, for ECHO_MAX repeated: a win, celebrated. */
+void controls_echo_won(void);
+
+/*
  * Ask for the save of anything still unsaved once `quiet_ms` has passed since the
  * last change; 0 asks now. Cheap: call it every frame.
  */

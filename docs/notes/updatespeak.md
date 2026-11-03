@@ -1,9 +1,90 @@
 # `UpdateSpeak` returns `SpeakUpdated` but the voice never changes
 
 > **Historical finding**, investigated 2026-08-21, against
-> `/v1/agent/converse` as it behaved then. It is why a voice change reopens
-> the session instead of updating it in place; see `docs/voice-commands.md`.
-> Re-measure before assuming the server side is unchanged.
+> `/v1/agent/converse` as it behaved then. **No longer true as of 2026-10-28**
+> (re-test below): the device now changes voice in place, with the reload kept
+> as a fallback and behind `CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE`.
+
+## 2026-10-29: `UpdateSpeak` and `UpdateListen` back to back lose one
+
+On the board, "Can you speak Bulgarian?" sent `UpdateSpeak`, `UpdateListen` and
+`UpdatePrompt` back to back. `ListenUpdated` and `PromptUpdated` came;
+`SpeakUpdated` never did, and the rest of the session was Hannah's voice
+speaking Bulgarian. No `Error`, no `Warning`.
+
+Reproduced from a laptop with a spoken request ("Can you speak Spanish?",
+synthesised, streamed in real time) answered the device's way, hannah →
+alfredo, a man, so median F0 shows whose voice each turn was. Eight trials per
+order:
+
+| order sent | `ListenUpdated` | `SpeakUpdated` | voice changed |
+|---|---|---|---|
+| Speak, Listen, Prompt (the firmware until now) | 8 | 2 | 2 (the six misses stayed at 180-242 Hz) |
+| Listen, Speak, Prompt | 2 | 8 | 8 |
+| Listen, wait for `ListenUpdated`, Speak, Prompt | 8 | 8 | 8 |
+| Speak, wait for `SpeakUpdated`, Listen, Prompt | 8 | 8 | 8 |
+
+**Whichever of the two goes first is usually dropped.** Listen-first was
+flashed briefly on the strength of the `SpeakUpdated` column alone, and on the
+board the switch back to English then lost `ListenUpdated` instead: the voice
+changed, Nova-3 `bg` kept listening ("Окей."), and the 5 s backstop reopened
+the session. The same drop hit Spanish and Bulgarian, and never a voice-only
+change, which sends no `UpdateListen` (11 of 11). A missing `SpeakUpdated`
+meant an unchanged voice every time it was checked.
+
+Waiting for `ListenUpdated` before the rest was flashed next, and found a
+second behaviour:
+
+**`UpdateListen` away from Nova-3 before the reply stalls the reply.** bg → en
+and bg → es, `UpdateListen` first and the rest on `ListenUpdated`: every update
+acknowledged, and no reply at all, 6 of 6. The session lives, and the next
+turn is answered. On the board, "English, please" from Bulgarian changed the
+voice and then said nothing.
+
+**The firmware now sends `UpdateListen` last:** `UpdateSpeak`, `UpdatePrompt`
+and the `FunctionCallResponse` at once, and `UpdateListen` after the
+confirmation's `AgentAudioDone`. 18 of 18 from the laptop over every direction
+between en, bg and es, each with all three acknowledged, the confirmation
+spoken within 1.5 s and the next question heard. On the board: en ⇄ bg,
+en ⇄ es, en ⇄ fr and en ⇄ ja (`host/voice_demo.sh`). The confirmation is
+spoken while the old listen model still runs, which matters only to a barge-in
+in the new language during it. If `ListenUpdated` never comes, the backstop
+reopens the session with the saved voice, as before.
+
+## Re-test, 2026-10-28: it works
+
+`host/agent_probe.py update-speak` ran the same repro from a laptop, in the
+device's audio format (linear16, 16 kHz, `container: none`), `flux-general-en`,
+gpt-5.4-mini. Each turn was an `InjectAgentMessage` of "One, two, three, four,
+five.", captured to a WAV.
+
+| turn | voice sent | bytes | median F0 | transcript |
+|---|---|---|---|---|
+| A-before | `flux-haley-en` (Settings) | 48,640 | 242 Hz | 12345 |
+| `UpdateSpeak` → `flux-cliff-en` | | | | `SpeakUpdated` |
+| A-after1 | | 158,720 | 93 Hz | 12345. |
+| A-after2 | | 181,760 | 99 Hz | 12345. |
+
+The F0 drop from Haley's range to Cliff's, on both turns after the update, is
+the change. F0 is autocorrelation over voiced frames this time, not the
+peak-bin probe discredited below, but it is still only a hint. **The listening
+check is pending**: it is in the attended block of the branch that adopted this.
+The longer "after" turns are Cliff's slower delivery; a nova-3 transcript of
+each WAV reads the same five digits.
+
+Case B, a language change mid-session, also took: `UpdateSpeak` to
+`flux-carmen-es`, `UpdateListen` to `flux-general-multi` with
+`language_hints ["es","en"]`, and `UpdatePrompt` each got their
+acknowledgement (`SpeakUpdated`, `ListenUpdated`, `PromptUpdated`), and a
+Spanish question synthesised by `/v2/speak` was heard as "¿Cuál es la capital de
+Francia?" and answered "La capital de Francia es París."
+
+What changed server-side is not known. Nothing in the client changed: the
+message is the same documented shape as before.
+
+---
+
+The original finding follows, unchanged.
 
 ## Summary
 

@@ -156,14 +156,38 @@ static volatile bool s_play_gap;
 static volatile bool s_chime_on;
 
 /*
- * The uplink withheld outright, whatever the VAD says: set while an alarm
- * chimes into a live session. A pure tone is what the echo canceller handles
- * worst, and its residue can clear the uplink VAD and read to the agent as the
- * user barging in. Withheld, not zeroed -- the VAD gate above already withholds
- * blocks, so a gap is something the stream is built for. The canceller and the
- * display tap still see everything.
+ * A single tone -- Echo's -- made the same way as the chime and for the same
+ * reason: the drain task synthesises it when the ring is empty, and nobody
+ * queues it. The request is ONE word, a sequence number over the pitch and the
+ * length (see audio_io_tone()), so the drain task can never read a new pitch
+ * with an old length: a 32-bit store is indivisible and three are not.
  */
-static volatile bool s_uplink_hold;
+#define TONE_SEQ_SHIFT  24
+#define TONE_MS_SHIFT   12
+#define TONE_FIELD      0xFFFu
+static volatile uint32_t s_tone_req;
+/*
+ * When a tone last went to the codec. Its own stamp, NOT s_play_write_ms: that
+ * one is what audio_io_playback_active() reads, and Echo waits on that to
+ * know when the AGENT has finished speaking -- a stamp that the player's own
+ * key press refreshed would read as the agent starting. Only the amplifier's
+ * idle timer reads both. Drain task only.
+ */
+static uint32_t s_tone_write_ms;
+
+/*
+ * The uplink withheld outright, whatever the VAD says: while an alarm chimes
+ * into a live session -- a pure tone is what the echo canceller handles worst,
+ * and its residue can clear the uplink VAD and read to the agent as the user
+ * barging in -- and while Echo is up. Withheld, not zeroed -- the VAD gate
+ * above already withholds blocks, so a gap is something the stream is built
+ * for. The canceller and the display tap still see everything.
+ *
+ * ONE BIT PER HOLDER (audio_io_hold_t), because the two overlap by design: an
+ * alarm ringing is what closes Echo, and Echo letting go on its way out must
+ * not let go of the alarm's hold too. Changed atomically; two tasks set bits.
+ */
+static volatile uint32_t s_uplink_hold;
 
 #if CONFIG_AEC_ENABLE
 /*
@@ -592,6 +616,33 @@ static void chime_fill(int16_t *out, size_t n, uint32_t *pos)
 }
 
 /*
+ * Echo's tones play under the chime's level: they come in quick runs, at the
+ * player's own volume, a foot from their face. To be confirmed by ear.
+ */
+#define TONE_PEAK       0.5f
+
+/*
+ * Fill `out` with the next `n` samples of a `len`-sample tone at `hz`, the
+ * chime's envelope on one note, and silence once it is over.
+ */
+static void tone_fill(int16_t *out, size_t n, uint32_t *pos, uint32_t len, float hz)
+{
+    const uint32_t rate = (uint32_t)s_rate;
+    const uint32_t attack = rate * 5 / 1000;
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t k = *pos;
+        float v = 0.0f;
+        if (k < len) {
+            const float env = (k < attack) ? (float)k / (float)attack
+                                           : (float)(len - k) / (float)(len - attack);
+            v = TONE_PEAK * env * sinf(2.0f * (float)M_PI * hz * (float)k / (float)rate);
+            *pos = k + 1;
+        }
+        out[i] = (int16_t)(v * 32767.0f);
+    }
+}
+
+/*
  * THE SPEAKER AMPLIFIER, OFF WHEN NOTHING PLAYS. Its enable pin (GPIO46) is
  * the codec driver's to switch on open and close, and the speaker stays open on
  * purpose -- reopening the ES8311 per turn clicks. So only the amplifier itself
@@ -748,7 +799,9 @@ static void pa_on(void)
 static void pa_idle(void)
 {
 #if CONFIG_AUDIO_PA_IDLE_OFF_MS > 0
-    if (s_pa_on && now_ms() - s_play_write_ms >= (uint32_t)CONFIG_AUDIO_PA_IDLE_OFF_MS) {
+    const uint32_t now = now_ms();
+    if (s_pa_on && now - s_play_write_ms >= (uint32_t)CONFIG_AUDIO_PA_IDLE_OFF_MS &&
+        now - s_tone_write_ms >= (uint32_t)CONFIG_AUDIO_PA_IDLE_OFF_MS) {
         gpio_set_level(BSP_POWER_AMP_IO, 0);
         s_pa_on = false;
         ESP_LOGI(TAG, "EVT pa off");
@@ -786,6 +839,8 @@ static void playback_task(void *arg)
     bool carry_valid = false;
     uint32_t chime_pos = 0;
     bool chiming = false;
+    uint32_t tone_seen = 0, tone_pos = 0, tone_len = 0;
+    float tone_hz = 0.0f;
 
     while (1) {
         /* Lead with the half sample left over from last time, if any. */
@@ -795,17 +850,28 @@ static void playback_task(void *arg)
             off = 1;
         }
 
+        /* A new tone replaces whatever is left of the last, from its start. */
+        const uint32_t req = s_tone_req;
+        if ((req >> TONE_SEQ_SHIFT) != tone_seen) {
+            tone_seen = req >> TONE_SEQ_SHIFT;
+            tone_hz = (float)(req & TONE_FIELD);
+            tone_len = (uint32_t)s_rate * ((req >> TONE_MS_SHIFT) & TONE_FIELD) / 1000;
+            tone_pos = 0;
+        }
+
         /* No wait while chiming: the tone is generated the instant the ring is
-         * found empty, and the codec write below is what paces the loop. */
+         * found empty, and the codec write below is what paces the loop. The
+         * chime outranks a tone, which waits under it. */
         const bool chime = s_chime_on;
-        if (s_deep_idle_want && !chime && !s_flush_pending &&
+        const bool tone = !chime && tone_pos < tone_len;
+        if (s_deep_idle_want && !chime && !tone && !s_flush_pending &&
             xStreamBufferIsEmpty(s_ring) == pdTRUE) {
             spk_close_if_idle();
         } else if (!s_deep_idle_want) {
             spk_reopen();   /* on the way out: before anything wants it */
         }
         size_t got = xStreamBufferReceive(s_ring, mono_bytes + off, CHUNK_MONO - off,
-                                         chime ? 0
+                                         (chime || tone) ? 0
                                          : pdMS_TO_TICKS(s_spk_closed ? DEEP_IDLE_WAIT_MS
                                                                       : DRAIN_WAIT_MS));
         size_t total = off + got;
@@ -815,6 +881,11 @@ static void playback_task(void *arg)
             chiming = chime;
             chime_pos = 0;
         }
+        /* Agent audio cuts a tone off rather than leaving the rest of it to
+         * sound after the reply, out of time with anything on the screen. */
+        if (tone && got > 0) {
+            tone_len = 0;
+        }
         /*
          * got, not total: the ring being empty is the condition. A half sample
          * held over from an odd-length reply makes total 1 forever, and testing
@@ -822,11 +893,15 @@ static void playback_task(void *arg)
          * carry byte is left exactly where it is -- `carry` still holds it, and
          * the next reply picks it up.
          */
-        if (chime && got == 0 && !s_flush_pending) {
+        if ((chime || tone) && got == 0 && !s_flush_pending) {
             /* Half a chunk, 32 ms at 16 kHz: short enough that a reply arriving
              * mid-ring takes over within a frame or two. */
             const size_t samples = CHUNK_MONO / sizeof(int16_t) / 2;
-            chime_fill(mono, samples, &chime_pos);
+            if (chime) {
+                chime_fill(mono, samples, &chime_pos);
+            } else {
+                tone_fill(mono, samples, &tone_pos, tone_len, tone_hz);
+            }
             if (!spk_reopen()) {   /* a ring out of deep idle */
                 vTaskDelay(pdMS_TO_TICKS(DRAIN_WAIT_MS));
                 continue;
@@ -849,7 +924,11 @@ static void playback_task(void *arg)
             if (err != ESP_CODEC_DEV_OK) {
                 ESP_LOGW(TAG, "esp_codec_dev_write failed: %d", err);
             }
-            s_play_write_ms = now_ms();
+            if (chime) {
+                s_play_write_ms = now_ms();
+            } else {
+                s_tone_write_ms = now_ms();
+            }
             continue;
         }
 
@@ -865,7 +944,7 @@ static void playback_task(void *arg)
             continue;
         }
 
-        if (got == 0 && !chime) {
+        if (got == 0 && !chime && !tone) {
             pa_idle();
         }
 
@@ -2224,6 +2303,19 @@ void audio_io_chime_stop(void)
     s_chime_on = false;
 }
 
+void audio_io_tone(unsigned hz, unsigned ms)
+{
+    static uint32_t seq;   /* one caller, the LVGL task */
+    seq = (seq + 1) & 0xFF;
+    if (seq == 0) {
+        seq = 1;   /* 0 is the drain task's "none seen yet" */
+    }
+    hz = hz > TONE_FIELD ? TONE_FIELD : hz;
+    ms = ms > TONE_FIELD ? TONE_FIELD : ms;
+    s_tone_req = (seq << TONE_SEQ_SHIFT) | ((uint32_t)ms << TONE_MS_SHIFT) | hz;
+    poke(s_play_task);
+}
+
 #if CONFIG_POWER_STATE_WALK
 void audio_io_bench_speaker(bool on)
 {
@@ -2242,11 +2334,13 @@ void audio_io_bench_speaker(bool on)
 }
 #endif
 
-void audio_io_uplink_hold(bool hold)
+void audio_io_uplink_hold(audio_io_hold_t who, bool hold)
 {
-    if (hold != s_uplink_hold) {
-        s_uplink_hold = hold;
-        ESP_LOGI(TAG, "EVT uplink hold %s", hold ? "on" : "off");
+    const uint32_t was = hold ? __atomic_fetch_or(&s_uplink_hold, (uint32_t)who, __ATOMIC_SEQ_CST)
+                              : __atomic_fetch_and(&s_uplink_hold, ~(uint32_t)who, __ATOMIC_SEQ_CST);
+    if (((was & (uint32_t)who) != 0) != hold) {
+        ESP_LOGI(TAG, "EVT uplink hold %s %s", who == AUDIO_HOLD_ALARM ? "alarm" : "echo",
+                 hold ? "on" : "off");
     }
 }
 

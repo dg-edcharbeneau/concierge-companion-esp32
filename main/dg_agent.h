@@ -81,11 +81,12 @@ typedef struct {
     /*
      * The session must be reopened to pick up a setting change.
      *
-     * UpdateSpeak is the documented way to change the voice in place, but it
-     * returns SpeakUpdated and then does nothing, so the only mechanism that
-     * actually works is a new Settings message -- which means a new session.
-     * Runs on the WebSocket task, which cannot stop the client itself, so the
-     * handler must hand the work to another task.
+     * A voice change normally applies in place through UpdateSpeak and friends
+     * (CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE). This is the route when that is
+     * off, and the fallback when the server refuses an update: a new Settings
+     * message, which means a new session. Runs on the WebSocket task, which
+     * cannot stop the client itself, so the handler must hand the work to
+     * another task.
      */
     void (*on_reload_required)(void *ctx);
 
@@ -98,6 +99,13 @@ typedef struct {
      * the handler must hand the work to another task.
      */
     void (*on_display_test_required)(void *ctx);
+
+    /*
+     * The agent called play_echo. On the WebSocket task, so the handler only
+     * asks for the screen; the session carries on. Returns false when the
+     * screen cannot open now, for the reply to say so.
+     */
+    bool (*on_echo_required)(void *ctx);
 
     void *ctx;
 } dg_agent_callbacks_t;
@@ -243,3 +251,25 @@ void dg_agent_flush_history(void);
  * spent five reconnecting does not announce a stale timer as news.
  */
 void dg_agent_announce(const char *text);
+
+/*
+ * Put `text` to the agent as if the user had said it (InjectUserMessage), for
+ * it to answer in its own words -- Echo's level callouts. Safe from any task;
+ * the text is copied, up to 127 bytes.
+ *
+ * Unlike an announcement, only for the session that is up NOW: dropped if none
+ * is ready, never the greeting, never retried when refused. One deep; a second
+ * before the first is sent replaces it.
+ */
+void dg_agent_nudge(const char *text);
+
+/* Drop a nudge not yet sent; one already sent goes its way. Any task. */
+void dg_agent_nudge_cancel(void);
+
+/*
+ * While `hold`, ConversationText is kept out of the history and the user-turn
+ * count: set for as long as Echo is up, so a game's callouts are not replayed
+ * into the next conversation. A nudge sent before the hold is let go stays
+ * out too, up to its reply. Safe from any task.
+ */
+void dg_agent_history_hold(bool hold);

@@ -111,11 +111,6 @@ static void expand_voice(char *out, size_t cap)
     snprintf(out, cap, "%s", (v != NULL) ? v->name : voices_current_model());
 }
 
-static void expand_listen_model(char *out, size_t cap)
-{
-    snprintf(out, cap, "Flux");
-}
-
 static void expand_speak_model(char *out, size_t cap)
 {
     snprintf(out, cap, "Flux TTS");
@@ -127,7 +122,9 @@ static const struct {
 } s_vars[] = {
     { "name",         expand_name },
     { "voice",        expand_voice },
-    { "listen_model", expand_listen_model },
+    /* Empty for English, so an English session's prompt is unchanged. */
+    { "language",     voices_language_note },
+    { "listen_model", voices_listen_model_name },
     { "speak_model",  expand_speak_model },
     /* Unused by the blocks as written, and deliberately kept: these are the
      * catalogs the function schemas already carry, here for a prompt that ever

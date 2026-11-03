@@ -9,8 +9,8 @@ The device has always survived a *network* disconnect. `dg_agent` keeps the
 conversation in RAM and replays it into `agent.context.messages` on every
 connect, suppressing the greeting when there is anything to replay — which is
 why `esp_websocket_client`'s five-second retry is invisible, and why a voice
-change (which needs a whole new session, because this account ignores
-`UpdateSpeak`) does not restart the conversation.
+change that falls back to a whole new session does not restart the
+conversation.
 
 What it did not survive was losing power. The ring was `.bss`, so a brownout, a
 crash, an unplugged cable or the 30-second stuck-session reboot in `main.c` all
@@ -22,7 +22,8 @@ came back to a device that greeted you as a stranger. That is the gap
 | Wi-Fi drops, socket retries | kept | replayed from RAM, always has been |
 | idle timeout stops the session | kept | the device went quiet; nobody ended anything |
 | tap or BOOT stops the session | kept | **changed** — see below |
-| voice change reloads the session | kept | replayed, plus a "you are resuming" note in the prompt |
+| voice change, in place | kept | the session never closes |
+| voice change reloads the session (fallback, or in-place off) | kept | replayed, plus a "you are resuming" note in the prompt |
 | brownout, crash, unplug, reboot | kept to within ~1.5 s | read back off flash at `dg_agent_init()` |
 | `new_conversation`, confirmed | gone | the one voice path that forgets |
 | hold-again on a stopped device | gone | the one gesture that forgets |
@@ -31,7 +32,8 @@ came back to a device that greeted you as a stranger. That is the gap
 
 The timezone and any pending timers and alarms are in NVS (`dgagent/tz`,
 `dgagent/alarms`) beside the voice and volume, and survive everything the
-credentials do. A timer or one-shot alarm whose moment passed while the device
+credentials do. So does Echo's best level (`dgagent/echo_best`). Echo's level
+callouts are never in the history: see [echo.md](echo.md). A timer or one-shot alarm whose moment passed while the device
 was off still rings if it is at most ten minutes late. See
 [the clock](clock.md#timers-and-alarms).
 

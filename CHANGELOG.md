@@ -6,8 +6,111 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-03
+
+Experimental pre-release. Verified on one bench board through logs, host
+harnesses and `host/voice_demo.sh`, which talks the board through language
+changes from a laptop speaker. Known issues: in Japanese, streaming Nova-3
+often loses the leading 英語 of "英語でお願いします" once the session has had a
+Japanese turn, so the way back to English can take a second ask (a Deepgram
+STT behaviour, reproduced off the board); Bulgarian voices are Flux TTS Early
+Access; the Echo callout variety and a win at level 99 have not been heard on
+the board.
+
+### Added
+
+- **Echo, with the agent calling the levels.** A memory game after Ed's
+  "Echo" design. Four quarter buttons in the palette's Phosphor, Clay, Brass and
+  Glass, each with its own note, sit round a hub that shows the level. Reach
+  it by a sideways swipe on from the stopwatch (orb clock → stopwatch → Echo →
+  orb clock) or by asking (`play_echo`, 113 B of `Settings`). Between levels
+  the agent calls out the new one in its own words: encouraging to level 9,
+  teasing to 14, snarky past that. Each callout is an `InjectUserMessage` with
+  its instruction inside, so the prompt carries nothing for it, and the next
+  round waits for it to finish. While Echo is up the microphone is held, the
+  callouts are kept out of the history, a session is started if none is
+  running, and the idle timeout waits until two minutes after the last press.
+  The best level is in NVS (`echo_best`). `CONFIG_ECHO`, default on;
+  `CONFIG_UI_ECHO_SELFTEST` for the bench. See `docs/echo.md`.
+- `audio_io_tone()`: a single tone, synthesised by the playback task as the
+  alarm chime is. It is not counted by `audio_io_playback_active()`, which keeps
+  meaning "the agent is speaking".
+
+- **Bulgarian**, with `flux-desislava-bg` and `flux-gergana-bg` (Flux TTS
+  Early Access). Only Nova-3 hears it, so it listens with Nova-3 `bg` as
+  Japanese does, and the Nova-3 fallback hints English alone for it, since
+  `flux-general-multi` fails a session hinted at `bg`.
+- **Nine more languages, chosen by voice.** The catalog grows from 36 English
+  Flux voices to 149, adding Spanish, French, German, Hindi, Russian,
+  Portuguese, Japanese, Italian and Dutch: every language `flux-general-multi`
+  can hear. A voice brings its language with it. The device listens with
+  `flux-general-multi` hinted at that language and English, the prompt tells
+  the model to answer in it, and a fresh session greets in it. Alarm
+  announcements stay English. Deepgram's docs say the Agent API takes English
+  Flux voices only; on this account it took all nine, measured with
+  `host/agent_probe.py` (`docs/notes/languages-probe.md`). The greetings want a
+  native speaker's review.
+- **Japanese listens with Nova-3**, not `flux-general-multi`, which kept the
+  meaning of 13 of 30 Japanese test commands against Nova-3's 22. Barge-in
+  signals about a second later in Japanese, and native English is heard
+  poorly, so "Speak English" (or asking in Japanese) is the way back -- the
+  one English phrase that reliably got through. Nova-3 also fails to start
+  about one session in five (in English too); the device then reconnects once
+  on `flux-general-multi` instead of freezing in "failed".
+- `list_voices`, which hands the model every voice in one language on request.
+  That is also how the 23 English voices that were Kconfig-only (the Irish,
+  Indian, Australian, Singaporean and Filipino accents) become reachable by
+  asking. `set_voice` drops its 13-name enum and its voice descriptions, which
+  move to `list_voices`, and names one voice per language instead. `Settings`
+  shrinks: 20,685 → 20,445 B with an English voice and 20,584 B with a Japanese
+  one, same history.
+- `host/agent_probe.py`, which asks the Agent API what it will do in the
+  device's audio format: the UpdateSpeak repro, the language matrix, and a check
+  of every model id. `host/voices.sh` checks the catalog table.
+
+### Changed
+
+- **A new palette, and a picker with one dial.** The orb's thirteen Vira colours
+  become Deepgram's brand colours: Fuchsia (#E042FF), the primary and now the
+  default, then Clay, Bakelite, Brass, Phosphor, Glass and Led. White is gone, so the out-of-box orb and everything that takes its colour (text,
+  clock, touch panel, Echo's hub) are Fuchsia-tinted. The colour page puts all
+  seven evenly round one dial, Fuchsia at twelve, per the "Radial color picker"
+  design. There is no second page and no "+2". The selected swatch is ringed and
+  checked, dark on a light colour and white on a dark one, with its name in the
+  middle over the plain colour word. The model gets each name with its plain word
+  ("led (purple)"), and `set_color` accepts either. A colour saved under an old
+  name boots as Fuchsia. `host/panel.sh` now links `orb_colors.c` and checks the
+  dial against it.
+- The microphone uplink hold has one bit per holder (`AUDIO_HOLD_ALARM`,
+  `AUDIO_HOLD_ECHO`), so Echo closing for an alarm cannot release the alarm's
+  hold.
+- **A voice change no longer reopens the session.** `UpdateSpeak` works again
+  (it was a no-op on 2026-08-21), so `set_voice` sends it, plus `UpdateListen`
+  on a language change and an `UpdatePrompt` line, and the confirmation is the
+  first thing said in the new voice. A refused update falls back to the old
+  reload. `CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE` (default on) chooses.
+
 ### Fixed
 
+- **A language change kept the old voice** about three times in four: sent
+  back to back, the server drops whichever of `UpdateSpeak` and `UpdateListen`
+  goes first, so the new language came out in the old voice for the rest of
+  the session. And `UpdateListen` away from Nova-3 before the reply stalls the
+  reply. `UpdateSpeak`, `UpdatePrompt` and the function response now go at
+  once, and `UpdateListen` after the confirmation has been spoken (18 of 18
+  measured). `docs/notes/updatespeak.md`.
+- **The agent answered in another language without changing voice.** "Can
+  you speak Spanish?" got "Sí, claro" in the English voice, 5 times in 16:
+  English sessions had no language line in the prompt. Every language now
+  gets "Reply only in X; for any other language, call set_voice first", which
+  also replaces "Reply in X unless asked otherwise", read as leave to answer
+  in English from Bulgarian (0 of 16 and 0 of 12 missed).
+- **Asked for a voice by an unlisted name, the agent kept the current one.**
+  `set_voice` lists only some voices, and "Switch to Pierre" came back as
+  `set_voice("hannah")`; accents and genders were guessed from bare names.
+  Its description now says every language has more, to pass any name as
+  asked, and to call `list_voices` before choosing by accent, gender or
+  description: 13 of 14 typical requests landed, against 9.
 - The AXP2101's charge target and rail report is logged 10 s after boot
   instead of during start-up, where it printed before a USB capture could
   reattach and so had never been seen.

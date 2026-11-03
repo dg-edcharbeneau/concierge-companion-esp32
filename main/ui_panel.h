@@ -38,6 +38,10 @@ bool ui_panel_pressed(int32_t x, int32_t y, bool can_open);
 void ui_panel_pressing(int32_t x, int32_t y);
 bool ui_panel_released(bool lost);
 
+/* The press under way began in the band a drag opens the panel from, while
+ * it could open: whatever else is on screen should not take it. */
+bool ui_panel_opening(void);
+
 /* Close now, e.g. for an alarm or for sleep. No-op when closed. */
 void ui_panel_close(const char *why);
 
@@ -57,7 +61,7 @@ bool ui_panel_frame(uint32_t now_ms, uint32_t tint_rgb, bool session_live);
 typedef enum {
     UI_ICON_MIC, UI_ICON_SPEAKER_HI, UI_ICON_SPEAKER_LO, UI_ICON_PLUS, UI_ICON_MINUS,
     UI_ICON_X, UI_ICON_LEFT, UI_ICON_RIGHT, UI_ICON_CHECK, UI_ICON_WAVE, UI_ICON_CLOCK,
-    UI_ICON_BELL_OFF, UI_ICON_ALARM,
+    UI_ICON_BELL_OFF, UI_ICON_ALARM, UI_ICON_REPLAY,
     /* The stopwatch's, smaller: about 18 px, for its 50 px round buttons. */
     UI_ICON_RESET, UI_ICON_FLAG, UI_ICON_PLAY, UI_ICON_PAUSE,
 } ui_icon_t;

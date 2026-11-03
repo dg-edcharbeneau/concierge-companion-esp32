@@ -42,7 +42,7 @@ flowchart TB
     end
 
     subgraph cat["Catalogs (LVGL-free, so the WebSocket side can read them)"]
-        voices["voices.c<br/><i>Flux TTS voices + NVS</i>"]
+        voices["voices.c<br/><i>Flux voices, languages + NVS</i>"]
         faces["faces.c<br/><i>face names for the schema</i>"]
         colors["orb_colors.c<br/><i>orb colour names + RGB</i>"]
     end
@@ -176,7 +176,8 @@ stateDiagram-v2
     Buffering --> Stopped: tap
     Connecting --> Stopped: tap
 
-    Ready --> Reloading: set_voice / reset_voice
+    Ready --> Ready: set_voice / reset_voice (UpdateSpeak, in place)
+    Ready --> Reloading: voice update refused, or in-place off
     Reloading --> Connecting: reopen with new Settings
 
     Ready --> Failed: transport / handshake error
@@ -188,12 +189,11 @@ stateDiagram-v2
     Forgotten --> Connecting: fresh Settings, greeting fires
 
     note right of Reloading
-        UpdateSpeak returns SpeakUpdated
-        and then does nothing, so the only
-        mechanism that works is a new
-        Settings message -- new session.
-        The recent turns are replayed into
-        it, so the conversation survives.
+        The fallback when an Update* is
+        refused, and the only route with
+        CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+        off. The recent turns are replayed
+        into it, so the conversation survives.
     end note
 
     note right of Forgotten
@@ -375,8 +375,9 @@ one, Deepgram would call a web service instead of asking the device:
 | `start_display_test` | Deferred to `AgentAudioDone`, then stops the session and hands the screen to `ui_start_display_test()` | always |
 | `set_name` | Saves to NVS; the model is told, and `{{name}}` carries it from the next `Settings` | always |
 | `reset_name` | Back to `CONFIG_AGENT_NAME`, same handoff | always |
-| `set_voice` | Saves to NVS, then reopens the session | Flux stack |
-| `reset_voice` | Back to `CONFIG_DEEPGRAM_FLUX_VOICE`, then reopens | Flux stack |
+| `set_voice` | Saves to NVS, then `UpdateSpeak` (+ `UpdateListen` on a language change) + `UpdatePrompt`; reopens instead if refused | always |
+| `list_voices` | Reads only. Every voice in one language, in the function response | always |
+| `reset_voice` | Back to `CONFIG_DEEPGRAM_FLUX_VOICE`, same route as `set_voice` | always |
 | `new_conversation` | Forgets everything, in RAM and on flash, then reopens. The only destructive one, so the confirmation is enforced in code rather than asked for in the description: the first call only arms | always |
 
 ## The system prompt
@@ -409,12 +410,13 @@ it copies and frees. Three properties are worth keeping:
   `.claude/skills/esp-stack-budget/`.
 
 `{{placeholders}}` are expanded as blocks are copied: `{{name}}`, `{{voice}}`,
-`{{listen_model}}`, `{{speak_model}}`, and the three catalogs. `{{name}}` is why
+`{{language}}` (empty for English), `{{listen_model}}`, `{{speak_model}}`, and
+the three catalogs. `{{name}}` is why
 renaming the agent needs no session reload — see voice-commands.md. An unknown
 one is
 copied through verbatim and logged, so a typo shows up rather than vanishing.
 
-A reopened session — every voice change is one — appends a note saying the
+A reopened session — a voice change that fell back to a reload is one — appends a note saying the
 replayed history is the same conversation, which is what stops the model
 starting over.
 
@@ -660,8 +662,8 @@ one you are usually looking at.
 `host/prompt.sh` does the same trick for the persona: it compiles the real
 `main/agent_prompt.c` against stub ESP-IDF headers and prints the assembled
 prompt, so reviewing a wording change costs a second instead of a flash.
-`--resumed` dumps the variant a session reopened by a voice change sends; it is
-the only variant left now that both build gates are gone.
+`--resumed` dumps the variant a reopened session sends, and `--spanish` the
+`{{language}}` line a non-English voice adds.
 
 `host/store.sh` is the same idea applied to a claim that hardware cannot check.
 `main/history_store.c` says a record is either complete or invisible -- the

@@ -260,6 +260,43 @@ static int s_inject_tries;
 static esp_timer_handle_t s_inject_retry;
 
 /*
+ * A NUDGE: words put in the user's mouth -- InjectUserMessage, so the agent
+ * answers them in its own words. Echo's level callouts, and only those today.
+ *
+ * Its own slot rather than the announcement's, because the two differ in
+ * everything that slot is careful about. A nudge is only worth sending into the
+ * session that is up now, so it is never the greeting, never waits out a
+ * reconnect, and is never retried: a refused level callout is stale by the time
+ * a retry could land, and Echo goes on without it after ECHO_SPEAK_WAIT_MS.
+ * One deep, the latest wins. Sent by keepalive_task, for the reason the
+ * announcement is (see above).
+ */
+#define NUDGE_MAX        128
+static char s_nudge[NUDGE_MAX];      /* under s_announce_lock; "" when empty */
+/* Whether the last inject sent was a nudge: InjectionRefused does not say
+ * which it refuses, and a nudge refused must not re-queue an announcement. */
+static volatile bool s_nudge_last;
+/*
+ * A nudge sent and its reply not yet seen. Echo can close in between, letting
+ * the history hold go, and the server's echo of the nudge and the agent's
+ * callout would then be stored as conversation. So they are held until the
+ * reply's ConversationText, a refusal or the socket closing -- or NUDGE_TAIL_MS,
+ * since AgentAudioDone is no marker on this stack (see main.c). A turn the user
+ * speaks inside that tail is lost to the history with it.
+ */
+#define NUDGE_TAIL_MS    10000
+static volatile bool s_nudge_inflight;
+static volatile uint32_t s_nudge_sent_ms;
+/*
+ * Held while Echo is up: ConversationText is neither kept in the history nor
+ * counted as a user turn. A callout is not conversation, and without this a
+ * game's worth fills the replay budget (HISTORY_REPLAY_BYTES) and comes back in
+ * the next session as though the user had said it. Not s_history_frozen, which
+ * the forget flow owns and SettingsApplied releases.
+ */
+static volatile bool s_history_hold;
+
+/*
  * The conversation so far, replayed into the next session's Settings so that
  * reopening the socket resumes it rather than restarting it -- and persisted by
  * history_store.c so that a reboot does the same.
@@ -1128,6 +1165,56 @@ static void announce_put(const char *text)
     portEXIT_CRITICAL(&s_announce_lock);
 }
 
+/* Take the nudge out of its slot, if there is one. */
+static bool nudge_take(char *out)
+{
+    portENTER_CRITICAL(&s_announce_lock);
+    const bool have = s_nudge[0] != '\0';
+    if (have) {
+        memcpy(out, s_nudge, NUDGE_MAX);
+        s_nudge[0] = '\0';
+    }
+    portEXIT_CRITICAL(&s_announce_lock);
+    return have;
+}
+
+static bool nudge_pending(void)
+{
+    return s_nudge[0] != '\0';   /* a byte read; the take is under the lock */
+}
+
+void dg_agent_nudge(const char *text)
+{
+    if (text == NULL || text[0] == '\0') {
+        return;
+    }
+    if (!s_ready || s_keepalive_task == NULL) {
+        ESP_LOGI(TAG, "EVT nudge dropped (no session)");
+        return;
+    }
+    portENTER_CRITICAL(&s_announce_lock);
+    strlcpy(s_nudge, text, sizeof(s_nudge));
+    portEXIT_CRITICAL(&s_announce_lock);
+    xTaskNotifyGive(s_keepalive_task);
+}
+
+void dg_agent_nudge_cancel(void)
+{
+    portENTER_CRITICAL(&s_announce_lock);
+    s_nudge[0] = '\0';
+    portEXIT_CRITICAL(&s_announce_lock);
+}
+
+static bool nudge_tail(void)
+{
+    return s_nudge_inflight && ms_now() - s_nudge_sent_ms < NUDGE_TAIL_MS;
+}
+
+void dg_agent_history_hold(bool hold)
+{
+    s_history_hold = hold;
+}
+
 static void inject_retry_cb(void *arg)
 {
     (void)arg;
@@ -1176,25 +1263,32 @@ void dg_agent_announce(const char *text)
 }
 
 /*
- * {"type":"InjectAgentMessage","behavior":"queue","message":"..."} into `out`,
+ * The JSON either inject opens with, up to the opening quote of its text.
+ *
+ * "queue" on the announcement rather than the default: the default is refused
+ * while the agent is mid-turn as well as the user, and an alarm landing in the
+ * middle of a reply should wait for it, not bounce. A nudge takes no behavior;
+ * InjectUserMessage has none.
+ */
+static const char INJECT_AGENT_HEAD[] =
+    "{\"type\":\"InjectAgentMessage\",\"behavior\":\"queue\",\"message\":\"";
+static const char INJECT_USER_HEAD[] = "{\"type\":\"InjectUserMessage\",\"content\":\"";
+
+/*
+ * `head`, `msg` escaped, and the close, into `out`,
  * by hand rather than through cJSON: this runs on keepalive_task's 3 kB stack,
  * where printf-family formatting and cJSON's printer are both more frame than
  * a fixed string needs. The message is escaped; a label is whatever the user
  * said, and a quote in it must not end the JSON string.
- *
- * "queue" rather than the default: the default is refused while the agent is
- * mid-turn as well as the user, and an alarm landing in the middle of a reply
- * should wait for it, not bounce.
  */
-static size_t build_inject(const char *msg, char *out, size_t cap)
+static size_t build_inject(const char *head, const char *msg, char *out, size_t cap)
 {
-    static const char HEAD[] = "{\"type\":\"InjectAgentMessage\",\"behavior\":\"queue\",\"message\":\"";
     static const char TAIL[] = "\"}";
-    size_t n = sizeof(HEAD) - 1;
+    size_t n = strlen(head);
     if (cap < n + sizeof(TAIL)) {
         return 0;
     }
-    memcpy(out, HEAD, n);
+    memcpy(out, head, n);
     for (const char *p = msg; *p; p++) {
         const bool esc = (*p == '"' || *p == '\\');
         if (n + (esc ? 2 : 1) + sizeof(TAIL) > cap) {
@@ -1280,17 +1374,413 @@ static void send_function_response(const char *id, const char *name, const char 
 
 
 /*
- * WHY THIS REOPENS THE SESSION
+ * agent.listen.provider and agent.speak.provider, built in one place each.
  *
- * UpdateSpeak is the documented way to change the voice in place. On this
- * account it answers SpeakUpdated and then changes nothing -- reproduced with a
- * bare UpdateSpeak sent nowhere near a function call, with both a Flux v2 and
- * an Aura v1 provider, against JSON matching the documented example exactly. A
- * fresh Settings message does work, so that is what this does.
+ * Settings and the in-place Update messages both carry these blocks, and two
+ * copies of them would drift -- a hint added to one and not the other is a
+ * session that hears Spanish only until the next reconnect.
  *
- * The cost is a new session, which is why dg_agent keeps a short history and
- * replays it -- see history_to_json().
+ * The voice implies the language (see voices.h). English keeps
+ * flux-general-en, which every barge-in measurement was made on; most others
+ * are flux-general-multi hinted at that language AND English, so "switch back to
+ * English" is still heard. A language flagged `nova` -- Japanese -- is Nova-3 in
+ * that language instead, which hears it far better and English far worse; see
+ * voices.c. `version` is what selects Flux -- the model name alone is not
+ * enough, and v1 is assumed when the field is absent. Thresholds are Flux's and
+ * omitted unless configured, because the server defaults are the right starting
+ * point.
  */
+/*
+ * Set when Nova-3 would not start listening, so the next listen block is
+ * flux-general-multi instead -- worse Japanese, but a session that runs.
+ *
+ * Nova-3 as the Agent API's listen provider failed to start in 5 of 24 fresh
+ * sessions measured on 2026-10-28, in English as well as Japanese, against 0
+ * of 12 for flux-general-multi (docs/notes/languages-probe.md). Treated as an
+ * Error, that froze the device in "failed" until a hold or a BOOT press about
+ * one Japanese session in five.
+ *
+ * Cleared by the next SettingsApplied, after the Settings it shaped has gone:
+ * the session after this one tries Nova-3 again. Written and read only on the
+ * WebSocket task.
+ */
+static bool s_nova_fallback;
+
+static void add_listen_provider(cJSON *listen)
+{
+    const language_t *lang = voices_language(voices_current());
+    cJSON *provider = cJSON_AddObjectToObject(listen, "provider");
+    cJSON_AddStringToObject(provider, "type", "deepgram");
+    if (lang->nova && !s_nova_fallback) {
+        /* `language` is the v1 option Flux does not take; the end-of-turn
+         * tunables below are Flux-only and would be refused here. */
+        cJSON_AddStringToObject(provider, "version", "v1");
+        cJSON_AddStringToObject(provider, "model", "nova-3");
+        cJSON_AddStringToObject(provider, "language", lang->code);
+        return;
+    }
+    cJSON_AddStringToObject(provider, "version", "v2");
+    if (voices_is_english(lang)) {
+        cJSON_AddStringToObject(provider, "model", "flux-general-en");
+    } else {
+        /* language_hints, not `language`: that is a v1 listen-provider option.
+         * A language multi cannot hear (Bulgarian) only gets here as the Nova-3
+         * fallback, and a hint for it fails the session, so it hints English
+         * alone: a session that hears "speak English" beats none. */
+        cJSON_AddStringToObject(provider, "model", "flux-general-multi");
+        cJSON *hints = cJSON_AddArrayToObject(provider, "language_hints");
+        if (lang->multi) {
+            cJSON_AddItemToArray(hints, cJSON_CreateString(lang->code));
+        }
+        cJSON_AddItemToArray(hints, cJSON_CreateString("en"));
+    }
+    if (strlen(CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD) > 0) {
+        cJSON_AddStringToObject(provider, "eot_threshold", CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD);
+    }
+#if CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS > 0
+    cJSON_AddNumberToObject(provider, "eot_timeout_ms", CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS);
+#endif
+}
+
+static void add_speak_provider(cJSON *speak)
+{
+    cJSON *provider = cJSON_AddObjectToObject(speak, "provider");
+    cJSON_AddStringToObject(provider, "type", "deepgram");
+    /* Same story as listen: "v2" is what picks Flux TTS. */
+    cJSON_AddStringToObject(provider, "version", "v2");
+    cJSON_AddStringToObject(provider, "model", voices_current_model());
+}
+
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+/*
+ * Update messages sent and not yet acknowledged, and until when an Error or a
+ * Warning is taken to be about them.
+ *
+ * Nothing in an Error names the message it answers, so attribution is by time:
+ * inside UPDATE_ACK_MS of sending an update, with acknowledgements still owed,
+ * a complaint is taken as the update refused and answered with a reload -- the
+ * voice is already in NVS, so a fresh Settings applies it whatever went wrong.
+ * Outside that window an Error is an Error. send_settings() clears all of this,
+ * so a dropped socket cannot leave a stale count to misread the next session's
+ * refusal with.
+ *
+ * An acknowledgement that never comes is the same failure without a message,
+ * and s_update_backstop is what notices it -- its own timer, for the reason
+ * s_test_backstop gives. Only ListenUpdated and PromptUpdated are owed:
+ * SpeakUpdated waits for the server to finish any audio it has queued, and
+ * sent straight after SettingsApplied it did not arrive within 6 s in two
+ * tries of two (host/agent_probe.py, 2026-10-28) on sessions that were fine.
+ * UpdateSpeak still opens the window in which an Error counts against it.
+ */
+#define UPDATE_ACK_MS 5000
+static int s_updates_pending;
+static int64_t s_update_deadline_us;
+static esp_timer_handle_t s_update_backstop;
+static portMUX_TYPE s_update_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/*
+ * Each in-place change appends to the server-side prompt (UpdatePrompt never
+ * replaces), so after this many the next change reloads instead and the prompt
+ * starts clean from the files. Counted per session.
+ */
+#define INPLACE_CHANGES_MAX 4
+static int s_inplace_changes;
+
+/*
+ * A language change's UpdateListen, still to send: it goes once the
+ * confirmation has been spoken -- see apply_voice_in_place(). ARMED when the
+ * FunctionCallResponse goes, SPOKEN on the agent's next line, and sent on the
+ * AgentAudioDone after that, so a filler line already playing when set_voice
+ * came cannot send it early.
+ *
+ * Under s_update_lock, because the backstop reads it too: a confirmation that
+ * never finishes is the same failure as an acknowledgement that never comes,
+ * and gets the same reload, after LISTEN_DUE_MS rather than UPDATE_ACK_MS.
+ */
+enum { LISTEN_NONE, LISTEN_ARMED, LISTEN_SPOKEN };
+static int s_listen_due;
+#define LISTEN_DUE_MS 20000
+
+static void updates_clear(void)
+{
+    portENTER_CRITICAL(&s_update_lock);
+    s_updates_pending = 0;
+    s_listen_due = LISTEN_NONE;
+    portEXIT_CRITICAL(&s_update_lock);
+    if (s_update_backstop != NULL) {
+        esp_timer_stop(s_update_backstop);
+    }
+}
+
+/* True, and the window closed, if an update is still owed an acknowledgement
+ * and was sent recently enough for a complaint now to be about it. */
+static bool take_update_refusal(void)
+{
+    bool refused;
+    portENTER_CRITICAL(&s_update_lock);
+    refused = s_updates_pending > 0 && esp_timer_get_time() < s_update_deadline_us;
+    if (refused) {
+        s_updates_pending = 0;
+        s_listen_due = LISTEN_NONE;   /* the reload brings the listen side */
+    }
+    portEXIT_CRITICAL(&s_update_lock);
+    if (refused && s_update_backstop != NULL) {
+        esp_timer_stop(s_update_backstop);
+    }
+    return refused;
+}
+
+static void update_acked(void)
+{
+    bool done;
+    portENTER_CRITICAL(&s_update_lock);
+    if (s_updates_pending > 0) {
+        s_updates_pending--;
+    }
+    done = (s_updates_pending == 0 && s_listen_due == LISTEN_NONE);
+    portEXIT_CRITICAL(&s_update_lock);
+    if (done && s_update_backstop != NULL) {
+        esp_timer_stop(s_update_backstop);
+    }
+}
+
+static void update_backstop_cb(void *arg)
+{
+    (void)arg;
+    bool owed;
+    portENTER_CRITICAL(&s_update_lock);
+    owed = s_updates_pending > 0 || s_listen_due != LISTEN_NONE;
+    s_updates_pending = 0;
+    s_listen_due = LISTEN_NONE;
+    portEXIT_CRITICAL(&s_update_lock);
+    /* s_ready for the reason reload_backstop_cb() gives: this can land on a
+     * session the user has just ended. */
+    if (owed && s_ready) {
+        ESP_LOGW(TAG, "voice update never acknowledged -- reopening the session instead");
+        schedule_reload();
+    }
+}
+
+static bool send_update(cJSON *root, const char *what, bool owes_ack)
+{
+    if (root == NULL) {
+        return false;
+    }
+    esp_err_t err = send_json(root, what);
+    cJSON_Delete(root);
+    if (err != ESP_OK) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_update_lock);
+    if (owes_ack) {
+        s_updates_pending++;
+    }
+    s_update_deadline_us = esp_timer_get_time() + UPDATE_ACK_MS * 1000LL;
+    portEXIT_CRITICAL(&s_update_lock);
+    if (s_update_backstop != NULL) {
+        esp_timer_stop(s_update_backstop);
+        esp_timer_start_once(s_update_backstop, UPDATE_ACK_MS * 1000ULL);
+    }
+    return true;
+}
+
+/* UpdateSpeak, then UpdatePrompt with `line`. False if either send failed. */
+static bool send_speak_and_prompt(const char *line)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (root != NULL) {
+        cJSON_AddStringToObject(root, "type", "UpdateSpeak");
+        add_speak_provider(cJSON_AddObjectToObject(root, "speak"));
+    }
+    if (!send_update(root, "UpdateSpeak", false)) {
+        return false;
+    }
+    root = cJSON_CreateObject();
+    if (root != NULL) {
+        cJSON_AddStringToObject(root, "type", "UpdatePrompt");
+        cJSON_AddStringToObject(root, "prompt", line);
+    }
+    return send_update(root, "UpdatePrompt", true);
+}
+
+/*
+ * Applies the voice voices_set() just adopted, without reopening the session,
+ * and answers function call `id` with `content` -- now, or for a language
+ * change once ListenUpdated is in. False, with nothing answered, if it could
+ * not; the caller reloads instead.
+ *
+ * UpdateSpeak was a no-op on this account when first tried (2026-08-21,
+ * docs/notes/updatespeak.md) and the device reopened the session instead. It
+ * was re-measured on 2026-10-28 with host/agent_probe.py and now works, along
+ * with UpdateListen and UpdatePrompt, so a change no longer costs a reconnect,
+ * a history replay and a second or so of silence.
+ *
+ * UpdatePrompt APPENDS to the prompt rather than replacing it, so the line says
+ * "from now on" and names the voice -- the {{voice}} sentence in the original
+ * prompt is now stale, and the newest line has to win. The next fresh Settings
+ * starts clean from the files.
+ *
+ * Listen is only updated when the language changes: flux-general-en is what
+ * barge-in was tuned on, and nothing else about listening depends on the voice.
+ *
+ * Runs on the WebSocket task, inside event dispatch, like send_function_response()
+ * -- plain text frames, which is safe here. The prompt line is built in PSRAM
+ * for the stack reason send_settings() gives.
+ */
+static bool apply_voice_in_place(const language_t *was, const char *id, const char *name,
+                                 const char *content)
+{
+    const voice_t *v = voices_current();
+    const language_t *lang = voices_language(v);
+
+    /*
+     * The prompt line first, because it is the one step that can fail before
+     * anything is sent: a voice whose prompt never followed would speak Spanish
+     * words in an English persona, and nothing would ever correct it.
+     *
+     * It says it REPLACES the earlier voice and language lines, because
+     * UpdatePrompt appends and the old ones stay in the prompt -- a Japanese
+     * session's "a request for English means switch voice" must not outlive
+     * Japanese. Japanese is the longest, at about 260 B;
+     * host/voices_test.c holds every language to LINE_LEN.
+     */
+    enum { LINE_LEN = 512 };
+    char *line = heap_caps_malloc(LINE_LEN, MALLOC_CAP_SPIRAM);
+    if (line == NULL) {
+        return false;
+    }
+    int n = snprintf(line, LINE_LEN, "Voice change, replacing any earlier voice or language "
+                     "instruction: you now speak as %s.", v->name);
+    if (n > 0 && (size_t)n < LINE_LEN) {
+        voices_language_note(line + n, LINE_LEN - (size_t)n);
+        /* {{listen_model}} in the original prompt goes stale too when the
+         * listen side changes family. */
+        if (lang->nova != was->nova) {
+            strlcat(line, lang->nova ? " You now listen with Nova-3." :
+                                       " You now listen with Flux.", LINE_LEN);
+        }
+    }
+
+    /*
+     * A LANGUAGE CHANGE SENDS UpdateListen LAST, once the confirmation has
+     * been spoken. Two server behaviours, both silent, measured from a laptop
+     * with spoken requests (2026-10-29 to 11-02, docs/notes/updatespeak.md):
+     *
+     * - UpdateSpeak and UpdateListen back to back: whichever goes first is
+     *   dropped about three times in four. On the board, Hannah speaking
+     *   Bulgarian; or Nova-3 still listening after the switch back.
+     * - UpdateListen away from Nova-3 before the reply (bg -> en, bg -> es,
+     *   even after waiting for ListenUpdated): no reply at all, 6 of 6, though
+     *   every update is acknowledged. The session lives; the next turn is
+     *   answered.
+     *
+     * Speak, Prompt and the FunctionCallResponse now, UpdateListen after the
+     * confirmation's AgentAudioDone: 18 of 18 over every direction between
+     * en, bg and es, each with all three acknowledged, the confirmation
+     * spoken within 1.5 s and the next question heard. The confirmation is
+     * spoken while the old listen model still runs, which only matters to a
+     * barge-in in the new language during it. A voice-only change sends no
+     * UpdateListen and was never affected.
+     */
+    bool ok = send_speak_and_prompt(line);
+    free(line);
+    if (!ok) {
+        return false;
+    }
+    send_function_response(id, name, content);
+    if (lang != was) {
+        portENTER_CRITICAL(&s_update_lock);
+        s_listen_due = LISTEN_ARMED;
+        portEXIT_CRITICAL(&s_update_lock);
+        if (s_update_backstop != NULL) {
+            esp_timer_stop(s_update_backstop);
+            esp_timer_start_once(s_update_backstop, LISTEN_DUE_MS * 1000ULL);
+        }
+    }
+    return true;
+}
+
+/* The agent has started the confirmation: its AgentAudioDone is the one. */
+static void listen_due_spoken(void)
+{
+    portENTER_CRITICAL(&s_update_lock);
+    if (s_listen_due == LISTEN_ARMED) {
+        s_listen_due = LISTEN_SPOKEN;
+    }
+    portEXIT_CRITICAL(&s_update_lock);
+}
+
+/*
+ * The last step of a language change, on the confirmation's AgentAudioDone.
+ * Taken under the lock, so the backstop cannot also act on it. A failed send
+ * reopens the session, as apply_voice() does: the voice is already saved.
+ */
+static void listen_due_send(void)
+{
+    bool due;
+    portENTER_CRITICAL(&s_update_lock);
+    due = (s_listen_due == LISTEN_SPOKEN);
+    if (due) {
+        s_listen_due = LISTEN_NONE;
+    }
+    portEXIT_CRITICAL(&s_update_lock);
+    if (!due) {
+        return;
+    }
+    cJSON *root = cJSON_CreateObject();
+    if (root != NULL) {
+        cJSON_AddStringToObject(root, "type", "UpdateListen");
+        add_listen_provider(cJSON_AddObjectToObject(root, "listen"));
+    }
+    if (!send_update(root, "UpdateListen", true)) {
+        updates_clear();
+        schedule_reload();
+    }
+}
+#endif
+
+/*
+ * Applies a voice voices_set() has just adopted, by whichever route this build
+ * uses, and answers function call `id` with the confirmation the agent should
+ * speak.
+ *
+ * In place, the confirmation is the first turn in the new voice, so it is said
+ * in the new language too. Reloading, it is the last turn in the old one, and
+ * the reconnect follows once it has been spoken.
+ */
+static void apply_voice(const language_t *was, const char *id, const char *name)
+{
+    const voice_t *v = voices_current();
+    const language_t *lang = voices_language(v);
+    char content[128];
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    if (lang != was) {
+        snprintf(content, sizeof(content), "Done: you are now %s, a %s voice. Say so briefly, "
+                 "in %s.", v->name, lang->name, lang->name);
+    } else {
+        snprintf(content, sizeof(content), "Done: you are now %s. Say so briefly.", v->name);
+    }
+    /*
+     * In place unless this session has already had its share of changes (see
+     * INPLACE_CHANGES_MAX), or a step fails -- an allocation, a cJSON node, a
+     * send. A failure reloads rather than half-applying: whatever did go out,
+     * the fresh Settings carries the whole voice.
+     */
+    if (s_inplace_changes < INPLACE_CHANGES_MAX &&
+        apply_voice_in_place(was, id, name, content)) {
+        s_inplace_changes++;
+        return;
+    }
+    updates_clear();
+#else
+    (void)was;
+#endif
+    schedule_reload();
+    snprintf(content, sizeof(content), "Switching to %s, a %s voice. Tell the user you are "
+             "changing voice now.", v->name, lang->name);
+    send_function_response(id, name, content);
+}
+
 /*
  * `arguments` arrives as a JSON-encoded *string*, not a nested object, so it
  * needs a second parse. Caller owns the result and must cJSON_Delete it.
@@ -1403,13 +1893,46 @@ static void handle_function_call(const cJSON *root)
 #endif
 
         if (strcmp(name->valuestring, "reset_voice") == 0) {
-            const voice_t *v = voices_default();
+            const language_t *was = voices_language(voices_current());
             voices_reset();
-            schedule_reload();
-            snprintf(content, sizeof(content),
-                     "Switching back to %s. Tell the user you are changing voice now.",
-                     v->name);
-            send_function_response(id->valuestring, name->valuestring, content);
+            apply_voice(was, id->valuestring, name->valuestring);
+            continue;
+        }
+
+        if (strcmp(name->valuestring, "list_voices") == 0) {
+            const language_t *lang = NULL;
+            cJSON *largs = function_args(fn);
+            if (largs != NULL) {
+                const cJSON *code = cJSON_GetObjectItemCaseSensitive(largs, "language");
+                if (cJSON_IsString(code)) {
+                    lang = voices_find_language(code->valuestring);
+                }
+                cJSON_Delete(largs);
+            }
+            if (lang == NULL) {
+                send_function_response(id->valuestring, name->valuestring,
+                                       "This device does not have voices in that language.");
+                continue;
+            }
+            /*
+             * PSRAM, not content[]: all 36 English voices with their blurbs run
+             * to about 1.6 kB, and this frame is the WebSocket task's -- the
+             * same reason the description buffers in send_settings() moved off
+             * the stack.
+             */
+            enum { LIST_LEN = 2048 };
+            char *list = heap_caps_malloc(LIST_LEN, MALLOC_CAP_SPIRAM);
+            if (list == NULL) {
+                send_function_response(id->valuestring, name->valuestring,
+                                       "The voice list is not available right now.");
+                continue;
+            }
+            int n = snprintf(list, LIST_LEN, "%s voices: ", lang->name);
+            if (n > 0 && (size_t)n < LIST_LEN) {
+                voices_list(lang, list + n, LIST_LEN - (size_t)n);
+            }
+            send_function_response(id->valuestring, name->valuestring, list);
+            free(list);
             continue;
         }
 
@@ -1424,12 +1947,10 @@ static void handle_function_call(const cJSON *root)
             }
 
             /*
-             * NO RELOAD, unlike set_voice. The voice is a Settings field and
-             * this account ignores UpdateSpeak, so changing it costs a new
-             * session; the name is only ever text inside the prompt, and telling
-             * the model here is enough for this session. {{name}} carries it
-             * from the next Settings onwards, so the two agree again as soon as
-             * anything reconnects.
+             * NO RELOAD and no UpdatePrompt: the name is only ever text inside
+             * the prompt, and telling the model here is enough for this session.
+             * {{name}} carries it from the next Settings onwards, so the two
+             * agree again as soon as anything reconnects.
              */
             esp_err_t nerr = agent_name_set(wanted);
             if (nerr != ESP_OK) {
@@ -1815,6 +2336,25 @@ static void handle_function_call(const cJSON *root)
             continue;
         }
 
+#if CONFIG_ECHO
+        if (strcmp(name->valuestring, "play_echo") == 0) {
+            cJSON *sargs = function_args(fn);
+            cJSON_Delete(sargs);
+            /* At once, not on AgentAudioDone like the display test: nothing is
+             * stopped, so nothing can cut the reply off, and the game waits for
+             * a tap on GO anyway. */
+            const bool shown = s_cb.on_echo_required != NULL &&
+                               s_cb.on_echo_required(s_cb.ctx);
+            ESP_LOGI(TAG, "EVT echo requested%s", shown ? "" : " (screen busy)");
+            send_function_response(id->valuestring, name->valuestring,
+                                   shown ? "Echo is on the screen. Tell the user to tap GO, "
+                                           "briefly."
+                                         : "Echo can't open right now; the screen is busy. "
+                                           "Tell the user briefly.");
+            continue;
+        }
+#endif
+
         if (strcmp(name->valuestring, "start_display_test") == 0) {
             /*
              * No arguments, but parse-and-free anyway: the model sometimes sends
@@ -1857,19 +2397,20 @@ static void handle_function_call(const cJSON *root)
         if (v == NULL) {
             /* Say so rather than staying silent: the agent turns this into an
              * explanation, and nothing is applied or saved. */
+            /* Without the enum the model can guess a name ("irish"), so the
+             * refusal points it at the list rather than ending the attempt. */
             send_function_response(id->valuestring, name->valuestring,
-                                   "That voice is not available on this device.");
+                                   "No voice by that name. Call list_voices for the names.");
             continue;
         }
 
         ESP_LOGI(TAG, "voice change requested: %s", v->model);
-        /* Persisted now rather than on an acknowledgement, because the new
-         * session reads it while building its Settings. */
+        const language_t *was = voices_language(voices_current());
+        /* Persisted now rather than on an acknowledgement: a reload -- the
+         * planned one, or the fallback when an update is refused -- reads it
+         * while building the new Settings. */
         voices_set(v);
-        schedule_reload();
-        snprintf(content, sizeof(content),
-                 "Switching to %s. Tell the user you are changing voice now.", v->name);
-        send_function_response(id->valuestring, name->valuestring, content);
+        apply_voice(was, id->valuestring, name->valuestring);
     }
 }
 
@@ -1932,6 +2473,18 @@ static const char *const CLOCK_TOOLS[] = {
     "\"string\"},\"stopwatch\":{\"type\":\"string\"}}}}",
 };
 
+#if CONFIG_ECHO
+/*
+ * The Echo game, as one raw reference like the clock's tools and for their
+ * reasons -- and as short. No parameters: the level callouts that follow are
+ * nudges (dg_agent_nudge()), which carry their own instructions, so the prompt
+ * and Settings pay only for this line.
+ */
+static const char ECHO_TOOL[] =
+    "{\"name\":\"play_echo\",\"description\":\"Open the Echo memory game.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{}}}";
+#endif
+
 /*
  * A raw node that REFERENCES the string instead of copying it. cJSON has no
  * constructor for that, but its printer copies a raw node's text verbatim and
@@ -1953,6 +2506,11 @@ static void add_raw_reference(cJSON *array, const char *json)
 
 static esp_err_t send_settings(void)
 {
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    /* A new connection owes nothing for the last one's updates, and its own
+     * Settings refusal must not be read as theirs. */
+    updates_clear();
+#endif
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
         return ESP_ERR_NO_MEM;
@@ -1974,29 +2532,8 @@ static esp_err_t send_settings(void)
 
     cJSON *agent = cJSON_AddObjectToObject(root, "agent");
 
-    cJSON *listen_provider = cJSON_AddObjectToObject(
-        cJSON_AddObjectToObject(agent, "listen"), "provider");
-    cJSON_AddStringToObject(listen_provider, "type", "deepgram");
-
-    /*
-     * Flux. `version` is what selects it -- the model name alone is not enough,
-     * and v1 is assumed when the field is absent.
-     *
-     * No `language` here: that is a v1 listen-provider option. Flux takes
-     * `language_hints` instead, and flux-general-en already implies English.
-     * Thresholds are omitted unless configured, because the server defaults are
-     * the right starting point.
-     */
-    cJSON_AddStringToObject(listen_provider, "version", "v2");
-    cJSON_AddStringToObject(listen_provider, "model", "flux-general-en");
-    if (strlen(CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD) > 0) {
-        cJSON_AddStringToObject(listen_provider, "eot_threshold",
-                                CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD);
-    }
-#if CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS > 0
-    cJSON_AddNumberToObject(listen_provider, "eot_timeout_ms",
-                            CONFIG_DEEPGRAM_FLUX_EOT_TIMEOUT_MS);
-#endif
+    /* Flux, in the voice's language -- see add_listen_provider(). */
+    add_listen_provider(cJSON_AddObjectToObject(agent, "listen"));
 
     cJSON *think = cJSON_AddObjectToObject(agent, "think");
     cJSON *think_provider = cJSON_AddObjectToObject(think, "provider");
@@ -2341,34 +2878,52 @@ static esp_err_t send_settings(void)
     cJSON_AddObjectToObject(tparams, "properties");
     cJSON_AddItemToArray(functions, set_test);
 
-    /* The catalog goes in the description because JSON Schema has nowhere to
-     * hang a per-enum-value note, and without it the model is choosing from
-     * bare first names. */
     /*
-     * The last of the three stack pairs, and the largest at 768 + 900 = 1,668 B.
-     * Same one-buffer PSRAM pattern as the two above.
+     * The catalog goes in the description because JSON Schema has nowhere to
+     * hang a per-enum-value note, and without it the model is choosing from
+     * bare first names.
      *
-     * 2048 rather than the 1024 the others use, and sized for growth rather than
-     * for today: 705 B is in use at thirteen featured voices, and voices.c keeps
-     * the other twenty-three precisely so widening the offer is "a one-flag
-     * change". All thirty-six would be 1,743 B, so that flag can be flipped
-     * without landing on voices_describe()'s truncation path -- which is the
-     * whole point of the catalog not living on the stack any more.
+     * NO ENUM on `voice` any more, and NO DESCRIPTIONS. With every language in
+     * the catalog an enum would be a hundred-odd names in every Settings
+     * message; instead this names the featured English voices and one per
+     * other language, list_voices hands over descriptions and the rest on
+     * request, and voices_find() still refuses anything not in the table.
+     *
+     * SAY THE LIST IS PARTIAL, AND WHEN TO LOOK. Against the Agent API with
+     * this prompt, 14 typical requests: with the old wording ("Accents,
+     * descriptions, more: list_voices") every plain language landed, but an
+     * unlisted name -- Pierre, Maeve -- came back as set_voice("hannah"), the
+     * voice the prompt says is current, and "Irish accent", "British woman" and
+     * "Portuguese man" were guessed from bare names without a list_voices
+     * call: 9/14. This wording: 13/14, the miss a Portuguese man given the one
+     * Portuguese name listed, a woman. About 200 B more Settings.
+     *
+     * SIZED AGAINST INTERNAL HEAP, not the wire -- see HISTORY_REPLAY_BYTES. A
+     * first cut that kept the English descriptions here grew Settings by 227 B
+     * past a baseline already over the 20 kB the session once flapped at.
+     * Measured on the board as written, same 466 B of history: main 20,685 B,
+     * this 20,445 B with an English voice and 20,584 B with a Japanese one.
+     *
+     * The largest of the stack pairs before it moved to PSRAM, at 768 + 900 =
+     * 1,668 B. Same one-buffer pattern as the two above; 2048 has room for both
+     * catalogs with plenty to spare.
      */
     enum { VOICE_DESC_LEN = 2048 };
     char *description = heap_caps_malloc(VOICE_DESC_LEN, MALLOC_CAP_SPIRAM);
     const char *description_str = "Change the voice you speak in.";
     if (description != NULL) {
         int n = snprintf(description, VOICE_DESC_LEN,
-                         "Change the voice you speak in. Use when the user asks you to sound "
-                         "different, or asks for a particular accent or gender. Voices: ");
+                         "Change your voice, and with it your language. Some English voices: ");
         if (n > 0 && (size_t)n < VOICE_DESC_LEN) {
             voices_describe(description + n, VOICE_DESC_LEN - (size_t)n);
+            strlcat(description, ". Also: ", VOICE_DESC_LEN);
             size_t used = strlen(description);
-            if (used + 2 <= VOICE_DESC_LEN) {
-                description[used] = '.';
-                description[used + 1] = '\0';
-            }
+            voices_languages_describe(description + used, VOICE_DESC_LEN - used);
+            strlcat(description,
+                    ". Every language has more: pass any name you are asked for as is. A name "
+                    "says nothing about accent or gender, so for either, or a description, "
+                    "call list_voices first.",
+                    VOICE_DESC_LEN);
             description_str = description;
         }
     }
@@ -2382,10 +2937,26 @@ static esp_err_t send_settings(void)
     cJSON *props = cJSON_AddObjectToObject(params, "properties");
     cJSON *voice_prop = cJSON_AddObjectToObject(props, "voice");
     cJSON_AddStringToObject(voice_prop, "type", "string");
-    voices_add_enum(voice_prop, "enum");
     cJSON *required = cJSON_AddArrayToObject(params, "required");
     cJSON_AddItemToArray(required, cJSON_CreateString("voice"));
     cJSON_AddItemToArray(functions, set_voice);
+
+    /* The rest of the catalog, one language at a time, sent only when asked
+     * for -- so the hundred-odd voices never ride in Settings. */
+    cJSON *list_voices = cJSON_CreateObject();
+    cJSON_AddStringToObject(list_voices, "name", "list_voices");
+    cJSON_AddStringToObject(list_voices, "description",
+                            "Every voice in a language, with accent and gender. Call it "
+                            "before choosing a voice by accent, gender or description.");
+    cJSON *lparams = cJSON_AddObjectToObject(list_voices, "parameters");
+    cJSON_AddStringToObject(lparams, "type", "object");
+    cJSON *lprops = cJSON_AddObjectToObject(lparams, "properties");
+    cJSON *lang_prop = cJSON_AddObjectToObject(lprops, "language");
+    cJSON_AddStringToObject(lang_prop, "type", "string");
+    voices_add_language_enum(lang_prop, "enum");
+    cJSON *lrequired = cJSON_AddArrayToObject(lparams, "required");
+    cJSON_AddItemToArray(lrequired, cJSON_CreateString("language"));
+    cJSON_AddItemToArray(functions, list_voices);
 
     cJSON *reset_voice = cJSON_CreateObject();
     cJSON_AddStringToObject(reset_voice, "name", "reset_voice");
@@ -2402,15 +2973,13 @@ static esp_err_t send_settings(void)
         add_raw_reference(functions, CLOCK_TOOLS[i]);
     }
 #endif
+#if CONFIG_ECHO
+    add_raw_reference(functions, ECHO_TOOL);
+#endif
 
-    cJSON *speak_provider = cJSON_AddObjectToObject(
-        cJSON_AddObjectToObject(agent, "speak"), "provider");
-    cJSON_AddStringToObject(speak_provider, "type", "deepgram");
-    /* Same story as listen: "v2" is what picks Flux TTS. Omitting agent.speak
-     * entirely would also get Flux with flux-kit-en, but being explicit keeps
-     * the voice configurable. */
-    cJSON_AddStringToObject(speak_provider, "version", "v2");
-    cJSON_AddStringToObject(speak_provider, "model", voices_current_model());
+    /* Omitting agent.speak entirely would also get Flux with flux-kit-en, but
+     * being explicit keeps the voice configurable. */
+    add_speak_provider(cJSON_AddObjectToObject(agent, "speak"));
     /*
      * Replayed context, and the greeting only when there is none. Resuming a
      * conversation should not open with "Hi! I am running on an ESP32" -- and
@@ -2430,7 +2999,13 @@ static esp_err_t send_settings(void)
             ESP_LOGI(TAG, "EVT announce as greeting: %s", said);
             cJSON_AddStringToObject(agent, "greeting", said);
         } else if (strlen(CONFIG_DEEPGRAM_AGENT_GREETING) > 0) {
-            cJSON_AddStringToObject(agent, "greeting", CONFIG_DEEPGRAM_AGENT_GREETING);
+            /* The Kconfig greeting is English; a Spanish voice opens in Spanish.
+             * An empty Kconfig greeting still means no greeting in any language.
+             * Alarm announcements above stay English -- they are firmware
+             * strings, not the model's. */
+            const char *greeting = voices_language(voices_current())->greeting;
+            cJSON_AddStringToObject(agent, "greeting",
+                                    greeting != NULL ? greeting : CONFIG_DEEPGRAM_AGENT_GREETING);
         }
     }
 
@@ -2440,6 +3015,33 @@ static esp_err_t send_settings(void)
 }
 
 /* ---------------- server messages ---------------- */
+
+/*
+ * Nova-3 would not start listening: reconnect, and listen with
+ * flux-general-multi instead.
+ *
+ * ALWAYS A RECONNECT, even mid-session when the socket looks fine. Measured on
+ * the board twice: after a refused UpdateListen to Nova-3, an UpdateListen to
+ * Flux on the same socket is acknowledged, but the server stops reading audio
+ * -- "send queue full" from then on, 50-63 frames dropped, and once a write
+ * timeout that dropped the socket. A fresh session came up on Flux in 1.6 s.
+ *
+ * The cost is one extra Settings, sent at the moment internal heap is most
+ * stretched (see HISTORY_REPLAY_BYTES), so this never loops: s_nova_fallback
+ * makes the second attempt Flux, and Flux was not seen to fail this way.
+ */
+static void nova_fallback(void)
+{
+    s_nova_fallback = true;
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    /* Nothing owed by a session that is about to go. */
+    updates_clear();
+#endif
+    ESP_LOGW(TAG, "Nova-3 would not start -- reconnecting with flux-general-multi");
+    if (s_cb.on_reload_required) {
+        s_cb.on_reload_required(s_cb.ctx);
+    }
+}
 
 static void handle_json(const char *json, int len)
 {
@@ -2476,6 +3078,13 @@ static void handle_json(const char *json, int len)
          * nothing. Anything said before here belonged to the conversation the
          * user asked to forget. */
         s_history_frozen = false;
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+        /* A fresh session has a clean prompt to append to. */
+        s_inplace_changes = 0;
+#endif
+        /* This Settings already carried the fallback if it needed one; the
+         * next session tries Nova-3 again. */
+        s_nova_fallback = false;
         set_state(DG_AGENT_READY);
         /* An alarm that opened this session and did not go out as the greeting
          * goes out now. The keepalive task sends it; see s_announce. */
@@ -2497,10 +3106,23 @@ static void handle_json(const char *json, int len)
              * confirmation unanswerable -- the device would ask forever. It is a
              * fact about the conversation, not about the arena.
              */
-            if (strcmp(role->valuestring, "user") == 0) {
-                s_user_turns++;
+            if (s_history_hold || nudge_tail()) {
+                /* Echo's callouts: said, shown, and forgotten. See s_history_hold
+                 * and s_nudge_inflight. */
+            } else {
+                if (strcmp(role->valuestring, "user") == 0) {
+                    s_user_turns++;
+                }
+                history_add(role->valuestring, content->valuestring);
             }
-            history_add(role->valuestring, content->valuestring);
+            if (s_nudge_inflight && strcmp(role->valuestring, "assistant") == 0) {
+                s_nudge_inflight = false;   /* the reply: the tail is over */
+            }
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+            if (strcmp(role->valuestring, "assistant") == 0) {
+                listen_due_spoken();
+            }
+#endif
             if (s_cb.on_conversation_text) {
                 s_cb.on_conversation_text(role->valuestring, content->valuestring, s_cb.ctx);
             }
@@ -2524,6 +3146,9 @@ static void handle_json(const char *json, int len)
 
     } else if (strcmp(t, "AgentAudioDone") == 0) {
         ESP_LOGI(TAG, "agent finished speaking");
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+        listen_due_send();
+#endif
         if (s_cb.on_agent_audio_done) {
             s_cb.on_agent_audio_done(s_cb.ctx);
         }
@@ -2568,8 +3193,12 @@ static void handle_json(const char *json, int len)
          * moment later, a few times -- by timer, NOT on AgentAudioDone, which
          * this stack almost never sends (see main.c). Past the last try it is
          * dropped: the chime and the caption already said something happened.
+         * A nudge refused is dropped outright; see s_nudge.
          */
-        if (s_inject_tries < INJECT_RETRIES && s_injected[0] != '\0') {
+        if (s_nudge_last) {
+            s_nudge_inflight = false;
+            ESP_LOGW(TAG, "EVT nudge refused");
+        } else if (s_inject_tries < INJECT_RETRIES && s_injected[0] != '\0') {
             s_inject_tries++;
             ESP_LOGW(TAG, "EVT announce refused, retry %d/%d", s_inject_tries, INJECT_RETRIES);
             announce_put(s_injected);
@@ -2581,13 +3210,44 @@ static void handle_json(const char *json, int len)
             ESP_LOGW(TAG, "EVT announce refused, giving up");
         }
 
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    } else if (strcmp(t, "ListenUpdated") == 0 || strcmp(t, "PromptUpdated") == 0) {
+        update_acked();
+        ESP_LOGI(TAG, "%s", t);
+
+    } else if (strcmp(t, "SpeakUpdated") == 0) {
+        /* Logged, not counted: see s_updates_pending for why it is not owed. */
+        ESP_LOGI(TAG, "%s", t);
+#endif
+
     } else if (strcmp(t, "Error") == 0) {
         const cJSON *desc = cJSON_GetObjectItemCaseSensitive(root, "description");
         const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "code");
         ESP_LOGE(TAG, "server error [%s]: %s",
                  cJSON_IsString(code) ? code->valuestring : "?",
                  cJSON_IsString(desc) ? desc->valuestring : "?");
+        if (cJSON_IsString(code) && strcmp(code->valuestring, "FAILED_TO_START_LISTENING") == 0 &&
+            voices_language(voices_current())->nova && !s_nova_fallback) {
+            nova_fallback();
+            cJSON_Delete(root);
+            return;
+        }
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+        /*
+         * An Error just after an update, with its acknowledgement still owed,
+         * is taken as that update refused -- see s_updates_pending. The voice
+         * is already saved, so a fresh session applies it, the way that never
+         * depended on the server honouring Update*.
+         */
+        if (take_update_refusal()) {
+            ESP_LOGW(TAG, "voice update refused -- reopening the session instead");
+            schedule_reload();
+        } else {
+            set_state(DG_AGENT_ERROR);
+        }
+#else
         set_state(DG_AGENT_ERROR);
+#endif
 
     } else if (strcmp(t, "LatencyReport") == 0 || strcmp(t, "History") == 0 ||
                strcmp(t, "AgentStartedSpeaking") == 0) {
@@ -2605,6 +3265,16 @@ static void handle_json(const char *json, int len)
         ESP_LOGW(TAG, "server warning [%s]: %s",
                  cJSON_IsString(code) ? code->valuestring : "?",
                  cJSON_IsString(desc) ? desc->valuestring : "?");
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+        /* The same attribution as an Error: a model the server could not honour
+         * for an update and substituted would otherwise leave the session
+         * listening in one language and speaking another. A reload's Settings
+         * either takes the model or says so where it cannot be misread. */
+        if (take_update_refusal()) {
+            ESP_LOGW(TAG, "voice update answered with a warning -- reopening the session");
+            schedule_reload();
+        }
+#endif
 
     } else {
         /* INFO, not DEBUG: anything the server says that we do not model is
@@ -2755,6 +3425,10 @@ static void on_ws_event(void *arg, esp_event_base_t base, int32_t id, void *data
          */
         s_clear_armed_ms = 0;
         s_clear_armed_turns = 0;
+        /* A nudge is for the session that is up, and its reply will not come
+         * on the next one. See s_nudge. */
+        dg_agent_nudge_cancel();
+        s_nudge_inflight = false;
         /*
          * s_test_pending deliberately SURVIVES. The argument above -- that a
          * reconnect rebuilds the session, which is all a pending reload wanted
@@ -2867,8 +3541,9 @@ static void keepalive_task(void *arg)
 
     /* Built here, on a 3 kB stack, so not on it -- and in PSRAM, once, since
      * internal RAM is the pool this board runs out of. Escaping can at most
-     * double the message; the rest is the fixed JSON around it. */
-    enum { INJECT_LEN = ANNOUNCE_MAX * 2 + 80 };
+     * double the message; the rest is the fixed JSON around it. Sized for the
+     * longer of the two slots, the nudge. */
+    enum { INJECT_LEN = NUDGE_MAX * 2 + 80 };
     char *inject = NULL;
 
     while (1) {
@@ -2892,11 +3567,12 @@ static void keepalive_task(void *arg)
          * `continue` would skip past the lowering.
          */
         s_sending_ka = true;
-        static char msg[ANNOUNCE_MAX];
+        bool injected = false;
+        static char msg[NUDGE_MAX];   /* either slot's text; the nudge's is longer */
         /* On demand, and before the take: if PSRAM cannot spare it now, the
          * announcement stays queued for the next wake instead of being taken
          * and lost. */
-        if (inject == NULL && announce_pending()) {
+        if (inject == NULL && (announce_pending() || nudge_pending())) {
             inject = heap_caps_malloc(INJECT_LEN, MALLOC_CAP_SPIRAM);
         }
         if (inject != NULL && s_ready && esp_websocket_client_is_connected(s_client) &&
@@ -2910,12 +3586,26 @@ static void keepalive_task(void *arg)
              * uplink blocks in poll_write. Weighed and accepted, 2026-10-22;
              * if "mic= frozen, rx=0" follows an announcement, this is the lead.
              */
-            const size_t len = build_inject(msg, inject, INJECT_LEN);
+            const size_t len = build_inject(INJECT_AGENT_HEAD, msg, inject, INJECT_LEN);
             if (len > 0) {
                 /* Kept for a retry; no log here, on this stack -- the server's
                  * ConversationText echo, or InjectionRefused, is the record. */
                 memcpy(s_injected, msg, sizeof(s_injected));
+                s_nudge_last = false;
                 esp_websocket_client_send_text(s_client, inject, (int)len, SEND_TIMEOUT);
+                injected = true;
+            }
+        } else if (inject != NULL && s_ready && esp_websocket_client_is_connected(s_client) &&
+                   nudge_take(msg)) {
+            /* The announcement's send, and its risk, for the user's side. Its
+             * record is the same: the ConversationText echo. */
+            const size_t len = build_inject(INJECT_USER_HEAD, msg, inject, INJECT_LEN);
+            if (len > 0) {
+                s_nudge_last = true;
+                s_nudge_sent_ms = ms_now();
+                s_nudge_inflight = true;
+                esp_websocket_client_send_text(s_client, inject, (int)len, SEND_TIMEOUT);
+                injected = true;
             }
         } else if (!poked && s_ready && esp_websocket_client_is_connected(s_client)) {
             /*
@@ -2949,6 +3639,16 @@ static void keepalive_task(void *arg)
                 esp_websocket_client_send_text(s_client, KEEPALIVE,
                                                sizeof(KEEPALIVE) - 1, SEND_TIMEOUT);
             }
+        }
+        /*
+         * One inject a wake, and the take above cleared both slots' pokes: an
+         * announcement and a nudge queued together would leave the nudge for the
+         * keepalive period -- as long as Echo waits for its callout. So go round
+         * again for the other. Only after a send, which empties a slot, so this
+         * cannot spin.
+         */
+        if (injected && (announce_pending() || nudge_pending())) {
+            xTaskNotifyGive(s_keepalive_task);
         }
         s_sending_ka = false;
     }
@@ -2998,6 +3698,15 @@ esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
         .name = "test_bkstp",
     };
     esp_timer_create(&tbargs, &s_test_backstop);
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    /* An in-place voice update whose acknowledgement never came; see
+     * s_updates_pending. */
+    const esp_timer_create_args_t uargs = {
+        .callback = update_backstop_cb,
+        .name = "update_bkstp",
+    };
+    esp_timer_create(&uargs, &s_update_backstop);
+#endif
     /* The announcement's retry after InjectionRefused; see s_announce. */
     const esp_timer_create_args_t iargs = {
         .callback = inject_retry_cb,
@@ -3299,6 +4008,8 @@ esp_err_t dg_agent_stop(void)
     }
     s_clear_armed_ms = 0;
     s_clear_armed_turns = 0;
+    dg_agent_nudge_cancel();
+    s_nudge_inflight = false;
 
     ESP_LOGI(TAG, "session stopped");
     return ESP_OK;

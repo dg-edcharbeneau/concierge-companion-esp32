@@ -29,11 +29,14 @@
  */
 #define PANEL_BRIDGE    38.0f    /* half its height: 76 px */
 
-/* The colour picker: twelve clock positions, 60 px swatches. */
+/*
+ * The colour picker: one dial, a 60 px swatch per colour set evenly round it,
+ * clockwise from twelve o'clock. Slot n is orb_colors.c's index n, so this is
+ * that catalog's size -- host/panel.sh checks the two agree.
+ */
 #define PANEL_RING_R    165.0f
 #define PANEL_SWATCH_R  30.0f
-#define PANEL_SLOTS     12
-#define PANEL_SLOT_MORE 6        /* 6 o'clock: "+2" on page A, back on page B */
+#define PANEL_SLOTS     7
 
 /* The alarm page's previous / next circles, either side of the time. */
 #define PANEL_NAV_X     150.0f   /* offset from centre */
@@ -94,20 +97,9 @@ float panel_coverage(float d);
 /* The pixel box a segment can paint into, inclusive. */
 void panel_seg_bbox(panel_seg_t seg, int *x0, int *y0, int *x1, int *y1);
 
-/* Centre of clock position `slot` (0 = twelve, clockwise) on the swatch ring. */
+/* Centre of swatch `slot` (0 at twelve, then clockwise) on the dial. */
 void panel_slot_center(int slot, float *x, float *y);
 
 /* What a touch at (x, y) lands on, on `page`. */
 panel_hit_t panel_hit(panel_page_t page, float x, float y);
 
-/*
- * The colour picker's two pages map clock positions onto orb_colors.c indices.
- * Page A holds indices 0..10 clockwise from twelve, skipping six; page B holds
- * the rest from twelve. Returns the colour index, PANEL_SLOT_IS_MORE for the
- * six o'clock button, or -1 for an empty position.
- */
-#define PANEL_SLOT_IS_MORE (-2)
-int panel_color_for_slot(int subpage, int slot, int color_count);
-
-/* Inverse: where colour `index` sits. Returns false for an index out of range. */
-bool panel_slot_for_color(int index, int color_count, int *subpage, int *slot);
