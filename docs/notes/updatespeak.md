@@ -5,6 +5,52 @@
 > (re-test below): the device now changes voice in place, with the reload kept
 > as a fallback and behind `CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE`.
 
+## 2026-10-29: `UpdateSpeak` and `UpdateListen` back to back lose one
+
+On the board, "Can you speak Bulgarian?" sent `UpdateSpeak`, `UpdateListen` and
+`UpdatePrompt` back to back. `ListenUpdated` and `PromptUpdated` came;
+`SpeakUpdated` never did, and the rest of the session was Hannah's voice
+speaking Bulgarian. No `Error`, no `Warning`.
+
+Reproduced from a laptop with a spoken request ("Can you speak Spanish?",
+synthesised, streamed in real time) answered the device's way, hannah →
+alfredo, a man, so median F0 shows whose voice each turn was. Eight trials per
+order:
+
+| order sent | `ListenUpdated` | `SpeakUpdated` | voice changed |
+|---|---|---|---|
+| Speak, Listen, Prompt (the firmware until now) | 8 | 2 | 2 (the six misses stayed at 180-242 Hz) |
+| Listen, Speak, Prompt | 2 | 8 | 8 |
+| Listen, wait for `ListenUpdated`, Speak, Prompt | 8 | 8 | 8 |
+| Speak, wait for `SpeakUpdated`, Listen, Prompt | 8 | 8 | 8 |
+
+**Whichever of the two goes first is usually dropped.** Listen-first was
+flashed briefly on the strength of the `SpeakUpdated` column alone, and on the
+board the switch back to English then lost `ListenUpdated` instead: the voice
+changed, Nova-3 `bg` kept listening ("Окей."), and the 5 s backstop reopened
+the session. The same drop hit Spanish and Bulgarian, and never a voice-only
+change, which sends no `UpdateListen` (11 of 11). A missing `SpeakUpdated`
+meant an unchanged voice every time it was checked.
+
+Waiting for `ListenUpdated` before the rest was flashed next, and found a
+second behaviour:
+
+**`UpdateListen` away from Nova-3 before the reply stalls the reply.** bg → en
+and bg → es, `UpdateListen` first and the rest on `ListenUpdated`: every update
+acknowledged, and no reply at all, 6 of 6. The session lives, and the next
+turn is answered. On the board, "English, please" from Bulgarian changed the
+voice and then said nothing.
+
+**The firmware now sends `UpdateListen` last:** `UpdateSpeak`, `UpdatePrompt`
+and the `FunctionCallResponse` at once, and `UpdateListen` after the
+confirmation's `AgentAudioDone`. 18 of 18 from the laptop over every direction
+between en, bg and es, each with all three acknowledged, the confirmation
+spoken within 1.5 s and the next question heard. On the board: en ⇄ bg,
+en ⇄ es, en ⇄ fr and en ⇄ ja (`host/voice_demo.sh`). The confirmation is
+spoken while the old listen model still runs, which matters only to a barge-in
+in the new language during it. If `ListenUpdated` never comes, the backstop
+reopens the session with the saved voice, as before.
+
 ## Re-test, 2026-10-28: it works
 
 `host/agent_probe.py update-speak` ran the same repro from a laptop, in the

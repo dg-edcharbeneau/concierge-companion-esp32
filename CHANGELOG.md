@@ -25,6 +25,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   alarm chime is. It is not counted by `audio_io_playback_active()`, which keeps
   meaning "the agent is speaking".
 
+- **Bulgarian**, with `flux-desislava-bg` and `flux-gergana-bg` (Flux TTS
+  Early Access). Only Nova-3 hears it, so it listens with Nova-3 `bg` as
+  Japanese does, and the Nova-3 fallback hints English alone for it, since
+  `flux-general-multi` fails a session hinted at `bg`.
 - **Nine more languages, chosen by voice.** The catalog grows from 36 English
   Flux voices to 149, adding Spanish, French, German, Hindi, Russian,
   Portuguese, Japanese, Italian and Dutch: every language `flux-general-multi`
@@ -77,6 +81,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A language change kept the old voice** about three times in four: sent
+  back to back, the server drops whichever of `UpdateSpeak` and `UpdateListen`
+  goes first, so the new language came out in the old voice for the rest of
+  the session. And `UpdateListen` away from Nova-3 before the reply stalls the
+  reply. `UpdateSpeak`, `UpdatePrompt` and the function response now go at
+  once, and `UpdateListen` after the confirmation has been spoken (18 of 18
+  measured). `docs/notes/updatespeak.md`.
+- **The agent answered in another language without changing voice.** "Can
+  you speak Spanish?" got "Sí, claro" in the English voice, 5 times in 16:
+  English sessions had no language line in the prompt. Every language now
+  gets "Reply only in X; for any other language, call set_voice first", which
+  also replaces "Reply in X unless asked otherwise", read as leave to answer
+  in English from Bulgarian (0 of 16 and 0 of 12 missed).
+- **Asked for a voice by an unlisted name, the agent kept the current one.**
+  `set_voice` lists only some voices, and "Switch to Pierre" came back as
+  `set_voice("hannah")`; accents and genders were guessed from bare names.
+  Its description now says every language has more, to pass any name as
+  asked, and to call `list_voices` before choosing by accent, gender or
+  description: 13 of 14 typical requests landed, against 9.
 - The AXP2101's charge target and rail report is logged 10 s after boot
   instead of during start-up, where it printed before a USB capture could
   reattach and so had never been seen.

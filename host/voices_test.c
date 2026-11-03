@@ -56,7 +56,8 @@ int cJSON_AddItemToArray(cJSON *array, cJSON *item)
 }
 
 /* The ten languages flux-general-multi hears (docs: Flux language prompting).
- * A hint outside this list is a 400 from the server. */
+ * A hint outside this list fails the session (a 400, or through the Agent API
+ * INTERNAL_SERVER_ERROR), so a row's `multi` must match it exactly. */
 static const char *const FLUX_STT[] = { "en", "es", "fr", "de", "hi", "ru", "pt", "ja", "it", "nl" };
 
 static int flux_stt_hears(const char *code)
@@ -121,8 +122,13 @@ int main(void)
                 featured += s_voices[i].featured;
             }
         }
-        if (!flux_stt_hears(lang->code)) {
-            printf("  %s: flux-general-multi cannot hear it\n", lang->code);
+        if (lang->multi != (bool)flux_stt_hears(lang->code)) {
+            printf("  %s: `multi` says %d, flux-general-multi says %d\n", lang->code,
+                   lang->multi, flux_stt_hears(lang->code));
+            hears = 0;
+        }
+        if (!lang->multi && !lang->nova) {
+            printf("  %s: neither flux-general-multi nor Nova-3 hears it\n", lang->code);
             hears = 0;
         }
         if (voices == 0) {
@@ -138,7 +144,7 @@ int main(void)
             greets = 0;
         }
     }
-    check("every language is one Flux STT can hear", hears);
+    check("every language is one the device can hear, `multi` exact", hears);
     check("every language has at least one voice", has_voice);
     check("every non-English language has exactly one featured voice", one_featured);
     check("every non-English language has its own greeting", greets);
@@ -183,12 +189,16 @@ int main(void)
     /* ---- the {{language}} line ---- */
     voices_set(voices_find("kit"));
     voices_language_note(buf, sizeof(buf));
-    check("English adds nothing to the prompt", buf[0] == '\0');
+    check("English gets the line too: reply in English, set_voice for any other",
+          strcmp(buf, " Reply only in English; for any other language, call "
+                      "set_voice first.") == 0);
 
     voices_set(voices_find("carmen"));
     voices_language_note(buf, sizeof(buf));
     check("a Spanish voice tells the model to reply in Spanish",
-          strncmp(buf, " Reply in Spanish", 17) == 0);
+          strncmp(buf, " Reply only in Spanish;", 23) == 0);
+    check("and that another language means set_voice, not just other words",
+          strstr(buf, "call set_voice first") != NULL);
     check("the current voice's language follows the voice",
           strcmp(voices_language(voices_current())->code, "es") == 0);
 
@@ -200,10 +210,15 @@ int main(void)
     voices_listen_model_name(buf, sizeof(buf));
     check("Japanese listens with Nova-3", strcmp(buf, "Nova-3") == 0);
     check("English never listens with Nova-3", !s_languages[0].nova);
+    voices_set(voices_find("desislava"));
+    voices_language_note(buf, sizeof(buf));
+    check("Bulgarian tells the model what English looks like through Nova-3",
+          strstr(buf, "peakenglish") != NULL);
+    voices_listen_model_name(buf, sizeof(buf));
+    check("Bulgarian listens with Nova-3", strcmp(buf, "Nova-3") == 0);
 
     /* apply_voice_in_place()'s UpdatePrompt line, built into LINE_LEN = 512 in
-     * dg_agent.c: the sentence, the language note (or the English line), and
-     * the listen-model tail. */
+     * dg_agent.c: the sentence, the language note and the listen-model tail. */
     size_t longest = 0;
     for (size_t i = 0; i < VOICE_COUNT; i++) {
         voices_set(&s_voices[i]);
@@ -211,7 +226,6 @@ int main(void)
         size_t n = strlen("Voice change, replacing any earlier voice or language "
                           "instruction: you now speak as .") +
                    strlen(s_voices[i].name) + strlen(buf) +
-                   strlen(" Reply in English unless asked otherwise.") +
                    strlen(" You now listen with Nova-3.");
         if (n > longest) {
             longest = n;

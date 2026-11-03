@@ -58,8 +58,9 @@ THINK = {"provider": {"type": "open_ai", "model": "gpt-5.4-mini"}}
 
 # Languages whose listen side is Nova-3 rather than flux-general-multi, as in
 # main/voices.c: flux-general-multi missed about half of a Japanese test set
-# that Nova-3 read almost perfectly (docs/notes/languages-probe.md).
-NOVA = {"ja"}
+# that Nova-3 read almost perfectly, and does not hear Bulgarian at all
+# (docs/notes/languages-probe.md).
+NOVA = {"ja", "bg"}
 
 # One voice per language, and a question in it for the listen side.
 LANGS = {
@@ -72,6 +73,7 @@ LANGS = {
     "ja": ("flux-ayumi-ja",   "Japanese",   "フランスの首都はどこですか？"),
     "it": ("flux-sofia-it",   "Italian",    "Qual è la capitale della Francia?"),
     "nl": ("flux-anouk-nl",   "Dutch",      "Wat is de hoofdstad van Duitsland?"),
+    "bg": ("flux-desislava-bg", "Bulgarian", "Коя е столицата на Франция?"),
 }
 
 PROMPT = "You are a helpful voice assistant. Answer in one short sentence."
@@ -102,7 +104,7 @@ def language_line(lang):
     """The firmware's {{language}} line -- keep in step with voices.c."""
     if lang == "en":
         return ""
-    line = f" Reply in {LANGS[lang][1]} unless asked otherwise."
+    line = f" Reply only in {LANGS[lang][1]}; for any other language, call set_voice first."
     if lang in NOVA:
         line += (" English may arrive garbled, like peakenglish; a request for "
                  "English means switch voice.")

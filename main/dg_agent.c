@@ -1423,10 +1423,15 @@ static void add_listen_provider(cJSON *listen)
     if (voices_is_english(lang)) {
         cJSON_AddStringToObject(provider, "model", "flux-general-en");
     } else {
-        /* language_hints, not `language`: that is a v1 listen-provider option. */
+        /* language_hints, not `language`: that is a v1 listen-provider option.
+         * A language multi cannot hear (Bulgarian) only gets here as the Nova-3
+         * fallback, and a hint for it fails the session, so it hints English
+         * alone: a session that hears "speak English" beats none. */
         cJSON_AddStringToObject(provider, "model", "flux-general-multi");
         cJSON *hints = cJSON_AddArrayToObject(provider, "language_hints");
-        cJSON_AddItemToArray(hints, cJSON_CreateString(lang->code));
+        if (lang->multi) {
+            cJSON_AddItemToArray(hints, cJSON_CreateString(lang->code));
+        }
         cJSON_AddItemToArray(hints, cJSON_CreateString("en"));
     }
     if (strlen(CONFIG_DEEPGRAM_FLUX_EOT_THRESHOLD) > 0) {
@@ -1481,10 +1486,26 @@ static portMUX_TYPE s_update_lock = portMUX_INITIALIZER_UNLOCKED;
 #define INPLACE_CHANGES_MAX 4
 static int s_inplace_changes;
 
+/*
+ * A language change's UpdateListen, still to send: it goes once the
+ * confirmation has been spoken -- see apply_voice_in_place(). ARMED when the
+ * FunctionCallResponse goes, SPOKEN on the agent's next line, and sent on the
+ * AgentAudioDone after that, so a filler line already playing when set_voice
+ * came cannot send it early.
+ *
+ * Under s_update_lock, because the backstop reads it too: a confirmation that
+ * never finishes is the same failure as an acknowledgement that never comes,
+ * and gets the same reload, after LISTEN_DUE_MS rather than UPDATE_ACK_MS.
+ */
+enum { LISTEN_NONE, LISTEN_ARMED, LISTEN_SPOKEN };
+static int s_listen_due;
+#define LISTEN_DUE_MS 20000
+
 static void updates_clear(void)
 {
     portENTER_CRITICAL(&s_update_lock);
     s_updates_pending = 0;
+    s_listen_due = LISTEN_NONE;
     portEXIT_CRITICAL(&s_update_lock);
     if (s_update_backstop != NULL) {
         esp_timer_stop(s_update_backstop);
@@ -1500,6 +1521,7 @@ static bool take_update_refusal(void)
     refused = s_updates_pending > 0 && esp_timer_get_time() < s_update_deadline_us;
     if (refused) {
         s_updates_pending = 0;
+        s_listen_due = LISTEN_NONE;   /* the reload brings the listen side */
     }
     portEXIT_CRITICAL(&s_update_lock);
     if (refused && s_update_backstop != NULL) {
@@ -1515,7 +1537,7 @@ static void update_acked(void)
     if (s_updates_pending > 0) {
         s_updates_pending--;
     }
-    done = (s_updates_pending == 0);
+    done = (s_updates_pending == 0 && s_listen_due == LISTEN_NONE);
     portEXIT_CRITICAL(&s_update_lock);
     if (done && s_update_backstop != NULL) {
         esp_timer_stop(s_update_backstop);
@@ -1527,8 +1549,9 @@ static void update_backstop_cb(void *arg)
     (void)arg;
     bool owed;
     portENTER_CRITICAL(&s_update_lock);
-    owed = s_updates_pending > 0;
+    owed = s_updates_pending > 0 || s_listen_due != LISTEN_NONE;
     s_updates_pending = 0;
+    s_listen_due = LISTEN_NONE;
     portEXIT_CRITICAL(&s_update_lock);
     /* s_ready for the reason reload_backstop_cb() gives: this can land on a
      * session the user has just ended. */
@@ -1561,8 +1584,30 @@ static bool send_update(cJSON *root, const char *what, bool owes_ack)
     return true;
 }
 
+/* UpdateSpeak, then UpdatePrompt with `line`. False if either send failed. */
+static bool send_speak_and_prompt(const char *line)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (root != NULL) {
+        cJSON_AddStringToObject(root, "type", "UpdateSpeak");
+        add_speak_provider(cJSON_AddObjectToObject(root, "speak"));
+    }
+    if (!send_update(root, "UpdateSpeak", false)) {
+        return false;
+    }
+    root = cJSON_CreateObject();
+    if (root != NULL) {
+        cJSON_AddStringToObject(root, "type", "UpdatePrompt");
+        cJSON_AddStringToObject(root, "prompt", line);
+    }
+    return send_update(root, "UpdatePrompt", true);
+}
+
 /*
- * Applies the voice voices_set() just adopted, without reopening the session.
+ * Applies the voice voices_set() just adopted, without reopening the session,
+ * and answers function call `id` with `content` -- now, or for a language
+ * change once ListenUpdated is in. False, with nothing answered, if it could
+ * not; the caller reloads instead.
  *
  * UpdateSpeak was a no-op on this account when first tried (2026-08-21,
  * docs/notes/updatespeak.md) and the device reopened the session instead. It
@@ -1582,7 +1627,8 @@ static bool send_update(cJSON *root, const char *what, bool owes_ack)
  * -- plain text frames, which is safe here. The prompt line is built in PSRAM
  * for the stack reason send_settings() gives.
  */
-static bool apply_voice_in_place(const language_t *was)
+static bool apply_voice_in_place(const language_t *was, const char *id, const char *name,
+                                 const char *content)
 {
     const voice_t *v = voices_current();
     const language_t *lang = voices_language(v);
@@ -1595,8 +1641,7 @@ static bool apply_voice_in_place(const language_t *was)
      * It says it REPLACES the earlier voice and language lines, because
      * UpdatePrompt appends and the old ones stay in the prompt -- a Japanese
      * session's "a request for English means switch voice" must not outlive
-     * Japanese. English gets an explicit line for the same reason, where a
-     * fresh Settings needs none. Japanese is the longest, at about 260 B;
+     * Japanese. Japanese is the longest, at about 260 B;
      * host/voices_test.c holds every language to LINE_LEN.
      */
     enum { LINE_LEN = 512 };
@@ -1607,11 +1652,7 @@ static bool apply_voice_in_place(const language_t *was)
     int n = snprintf(line, LINE_LEN, "Voice change, replacing any earlier voice or language "
                      "instruction: you now speak as %s.", v->name);
     if (n > 0 && (size_t)n < LINE_LEN) {
-        if (voices_is_english(lang)) {
-            strlcat(line, " Reply in English unless asked otherwise.", LINE_LEN);
-        } else {
-            voices_language_note(line + n, LINE_LEN - (size_t)n);
-        }
+        voices_language_note(line + n, LINE_LEN - (size_t)n);
         /* {{listen_model}} in the original prompt goes stale too when the
          * listen side changes family. */
         if (lang->nova != was->nova) {
@@ -1620,63 +1661,114 @@ static bool apply_voice_in_place(const language_t *was)
         }
     }
 
-    bool ok = true;
+    /*
+     * A LANGUAGE CHANGE SENDS UpdateListen LAST, once the confirmation has
+     * been spoken. Two server behaviours, both silent, measured from a laptop
+     * with spoken requests (2026-10-29 to 11-02, docs/notes/updatespeak.md):
+     *
+     * - UpdateSpeak and UpdateListen back to back: whichever goes first is
+     *   dropped about three times in four. On the board, Hannah speaking
+     *   Bulgarian; or Nova-3 still listening after the switch back.
+     * - UpdateListen away from Nova-3 before the reply (bg -> en, bg -> es,
+     *   even after waiting for ListenUpdated): no reply at all, 6 of 6, though
+     *   every update is acknowledged. The session lives; the next turn is
+     *   answered.
+     *
+     * Speak, Prompt and the FunctionCallResponse now, UpdateListen after the
+     * confirmation's AgentAudioDone: 18 of 18 over every direction between
+     * en, bg and es, each with all three acknowledged, the confirmation
+     * spoken within 1.5 s and the next question heard. The confirmation is
+     * spoken while the old listen model still runs, which only matters to a
+     * barge-in in the new language during it. A voice-only change sends no
+     * UpdateListen and was never affected.
+     */
+    bool ok = send_speak_and_prompt(line);
+    free(line);
+    if (!ok) {
+        return false;
+    }
+    send_function_response(id, name, content);
+    if (lang != was) {
+        portENTER_CRITICAL(&s_update_lock);
+        s_listen_due = LISTEN_ARMED;
+        portEXIT_CRITICAL(&s_update_lock);
+        if (s_update_backstop != NULL) {
+            esp_timer_stop(s_update_backstop);
+            esp_timer_start_once(s_update_backstop, LISTEN_DUE_MS * 1000ULL);
+        }
+    }
+    return true;
+}
+
+/* The agent has started the confirmation: its AgentAudioDone is the one. */
+static void listen_due_spoken(void)
+{
+    portENTER_CRITICAL(&s_update_lock);
+    if (s_listen_due == LISTEN_ARMED) {
+        s_listen_due = LISTEN_SPOKEN;
+    }
+    portEXIT_CRITICAL(&s_update_lock);
+}
+
+/*
+ * The last step of a language change, on the confirmation's AgentAudioDone.
+ * Taken under the lock, so the backstop cannot also act on it. A failed send
+ * reopens the session, as apply_voice() does: the voice is already saved.
+ */
+static void listen_due_send(void)
+{
+    bool due;
+    portENTER_CRITICAL(&s_update_lock);
+    due = (s_listen_due == LISTEN_SPOKEN);
+    if (due) {
+        s_listen_due = LISTEN_NONE;
+    }
+    portEXIT_CRITICAL(&s_update_lock);
+    if (!due) {
+        return;
+    }
     cJSON *root = cJSON_CreateObject();
     if (root != NULL) {
-        cJSON_AddStringToObject(root, "type", "UpdateSpeak");
-        add_speak_provider(cJSON_AddObjectToObject(root, "speak"));
+        cJSON_AddStringToObject(root, "type", "UpdateListen");
+        add_listen_provider(cJSON_AddObjectToObject(root, "listen"));
     }
-    ok = send_update(root, "UpdateSpeak", false);
-
-    if (ok && lang != was) {
-        root = cJSON_CreateObject();
-        if (root != NULL) {
-            cJSON_AddStringToObject(root, "type", "UpdateListen");
-            add_listen_provider(cJSON_AddObjectToObject(root, "listen"));
-        }
-        ok = send_update(root, "UpdateListen", true);
+    if (!send_update(root, "UpdateListen", true)) {
+        updates_clear();
+        schedule_reload();
     }
-
-    if (ok) {
-        root = cJSON_CreateObject();
-        if (root != NULL) {
-            cJSON_AddStringToObject(root, "type", "UpdatePrompt");
-            cJSON_AddStringToObject(root, "prompt", line);
-        }
-        ok = send_update(root, "UpdatePrompt", true);
-    }
-    free(line);
-    return ok;
 }
 #endif
 
 /*
  * Applies a voice voices_set() has just adopted, by whichever route this build
- * uses, and writes the confirmation the agent should speak into `content`.
+ * uses, and answers function call `id` with the confirmation the agent should
+ * speak.
  *
  * In place, the confirmation is the first turn in the new voice, so it is said
  * in the new language too. Reloading, it is the last turn in the old one, and
  * the reconnect follows once it has been spoken.
  */
-static void apply_voice(const language_t *was, char *content, size_t len)
+static void apply_voice(const language_t *was, const char *id, const char *name)
 {
     const voice_t *v = voices_current();
     const language_t *lang = voices_language(v);
+    char content[128];
 #if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+    if (lang != was) {
+        snprintf(content, sizeof(content), "Done: you are now %s, a %s voice. Say so briefly, "
+                 "in %s.", v->name, lang->name, lang->name);
+    } else {
+        snprintf(content, sizeof(content), "Done: you are now %s. Say so briefly.", v->name);
+    }
     /*
      * In place unless this session has already had its share of changes (see
      * INPLACE_CHANGES_MAX), or a step fails -- an allocation, a cJSON node, a
      * send. A failure reloads rather than half-applying: whatever did go out,
      * the fresh Settings carries the whole voice.
      */
-    if (s_inplace_changes < INPLACE_CHANGES_MAX && apply_voice_in_place(was)) {
+    if (s_inplace_changes < INPLACE_CHANGES_MAX &&
+        apply_voice_in_place(was, id, name, content)) {
         s_inplace_changes++;
-        if (lang != was) {
-            snprintf(content, len, "Done: you are now %s, a %s voice. Say so briefly, in %s.",
-                     v->name, lang->name, lang->name);
-        } else {
-            snprintf(content, len, "Done: you are now %s. Say so briefly.", v->name);
-        }
         return;
     }
     updates_clear();
@@ -1684,8 +1776,9 @@ static void apply_voice(const language_t *was, char *content, size_t len)
     (void)was;
 #endif
     schedule_reload();
-    snprintf(content, len, "Switching to %s, a %s voice. Tell the user you are changing "
-             "voice now.", v->name, lang->name);
+    snprintf(content, sizeof(content), "Switching to %s, a %s voice. Tell the user you are "
+             "changing voice now.", v->name, lang->name);
+    send_function_response(id, name, content);
 }
 
 /*
@@ -1802,8 +1895,7 @@ static void handle_function_call(const cJSON *root)
         if (strcmp(name->valuestring, "reset_voice") == 0) {
             const language_t *was = voices_language(voices_current());
             voices_reset();
-            apply_voice(was, content, sizeof(content));
-            send_function_response(id->valuestring, name->valuestring, content);
+            apply_voice(was, id->valuestring, name->valuestring);
             continue;
         }
 
@@ -2318,8 +2410,7 @@ static void handle_function_call(const cJSON *root)
          * planned one, or the fallback when an update is refused -- reads it
          * while building the new Settings. */
         voices_set(v);
-        apply_voice(was, content, sizeof(content));
-        send_function_response(id->valuestring, name->valuestring, content);
+        apply_voice(was, id->valuestring, name->valuestring);
     }
 }
 
@@ -2798,6 +2889,15 @@ static esp_err_t send_settings(void)
      * other language, list_voices hands over descriptions and the rest on
      * request, and voices_find() still refuses anything not in the table.
      *
+     * SAY THE LIST IS PARTIAL, AND WHEN TO LOOK. Against the Agent API with
+     * this prompt, 14 typical requests: with the old wording ("Accents,
+     * descriptions, more: list_voices") every plain language landed, but an
+     * unlisted name -- Pierre, Maeve -- came back as set_voice("hannah"), the
+     * voice the prompt says is current, and "Irish accent", "British woman" and
+     * "Portuguese man" were guessed from bare names without a list_voices
+     * call: 9/14. This wording: 13/14, the miss a Portuguese man given the one
+     * Portuguese name listed, a woman. About 200 B more Settings.
+     *
      * SIZED AGAINST INTERNAL HEAP, not the wire -- see HISTORY_REPLAY_BYTES. A
      * first cut that kept the English descriptions here grew Settings by 227 B
      * past a baseline already over the 20 kB the session once flapped at.
@@ -2813,13 +2913,17 @@ static esp_err_t send_settings(void)
     const char *description_str = "Change the voice you speak in.";
     if (description != NULL) {
         int n = snprintf(description, VOICE_DESC_LEN,
-                         "Change your voice, and with it your language. English: ");
+                         "Change your voice, and with it your language. Some English voices: ");
         if (n > 0 && (size_t)n < VOICE_DESC_LEN) {
             voices_describe(description + n, VOICE_DESC_LEN - (size_t)n);
             strlcat(description, ". Also: ", VOICE_DESC_LEN);
             size_t used = strlen(description);
             voices_languages_describe(description + used, VOICE_DESC_LEN - used);
-            strlcat(description, ". Accents, descriptions, more: list_voices.", VOICE_DESC_LEN);
+            strlcat(description,
+                    ". Every language has more: pass any name you are asked for as is. A name "
+                    "says nothing about accent or gender, so for either, or a description, "
+                    "call list_voices first.",
+                    VOICE_DESC_LEN);
             description_str = description;
         }
     }
@@ -2842,7 +2946,8 @@ static esp_err_t send_settings(void)
     cJSON *list_voices = cJSON_CreateObject();
     cJSON_AddStringToObject(list_voices, "name", "list_voices");
     cJSON_AddStringToObject(list_voices, "description",
-                            "Voices in a language, described.");
+                            "Every voice in a language, with accent and gender. Call it "
+                            "before choosing a voice by accent, gender or description.");
     cJSON *lparams = cJSON_AddObjectToObject(list_voices, "parameters");
     cJSON_AddStringToObject(lparams, "type", "object");
     cJSON *lprops = cJSON_AddObjectToObject(lparams, "properties");
@@ -3013,6 +3118,11 @@ static void handle_json(const char *json, int len)
             if (s_nudge_inflight && strcmp(role->valuestring, "assistant") == 0) {
                 s_nudge_inflight = false;   /* the reply: the tail is over */
             }
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+            if (strcmp(role->valuestring, "assistant") == 0) {
+                listen_due_spoken();
+            }
+#endif
             if (s_cb.on_conversation_text) {
                 s_cb.on_conversation_text(role->valuestring, content->valuestring, s_cb.ctx);
             }
@@ -3036,6 +3146,9 @@ static void handle_json(const char *json, int len)
 
     } else if (strcmp(t, "AgentAudioDone") == 0) {
         ESP_LOGI(TAG, "agent finished speaking");
+#if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
+        listen_due_send();
+#endif
         if (s_cb.on_agent_audio_done) {
             s_cb.on_agent_audio_done(s_cb.ctx);
         }

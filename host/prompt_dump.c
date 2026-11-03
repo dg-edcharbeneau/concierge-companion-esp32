@@ -36,12 +36,11 @@ void voices_listen_model_name(char *out, size_t out_len)
     snprintf(out, out_len, "Flux");
 }
 
-/* The same sentence main/voices.c writes, for the one voice here that needs it. */
+/* The same sentence main/voices.c writes, for the two voices here. */
 void voices_language_note(char *out, size_t out_len)
 {
-    snprintf(out, out_len, "%s", s_voice == &s_carmen
-             ? " Reply in Spanish unless asked otherwise."
-             : "");
+    snprintf(out, out_len, " Reply only in %s; for any other language, call set_voice first.",
+             s_voice == &s_carmen ? "Spanish" : "English");
 }
 
 void voices_describe(char *out, size_t out_len)

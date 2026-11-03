@@ -392,7 +392,7 @@ that depends on language:
 
 | | English voice | Any other voice |
 |---|---|---|
-| Listen | `flux-general-en` | `flux-general-multi`, `language_hints: [lang, "en"]`; Japanese: Nova-3, `language: "ja"` |
+| Listen | `flux-general-en` | `flux-general-multi`, `language_hints: [lang, "en"]`; Japanese and Bulgarian: Nova-3, `language: "ja"` / `"bg"` |
 | Prompt | unchanged | "Speak Spanish. The person may also use English; …" (`{{language}}`) |
 | Greeting | `CONFIG_DEEPGRAM_AGENT_GREETING` | the language's own, from `voices.c` |
 
@@ -406,10 +406,19 @@ price is that barge-in signals about a second later (+1.5 s against +0.65 s),
 and that `language: "ja"` hears native English poorly, so the Japanese prompt
 line tells the model English may arrive garbled.
 
+**Bulgarian listens with Nova-3 because nothing else hears it.**
+`flux-general-multi` fails the session on a `bg` hint and hears Bulgarian as
+English nonsense without one. English through Nova-3 `bg` comes out half
+Cyrillic ("Спик English"), so Bulgarian gets the same garbled-English line as
+Japanese. "English, please" or "Говори на английски" are the reliable ways
+back. Bulgarian is Early Access in Flux TTS, with two voices, both women.
+
 Nova-3 as the agent's listen model also **fails to start about one session in
 five** (`FAILED_TO_START_LISTENING`, English as well as Japanese; Flux 0 of 12).
 When it does, the device reconnects once with `flux-general-multi` for that
 session rather than freezing in "failed", and tries Nova-3 again next session.
+In Bulgarian that session is hinted at English alone, so it hears English
+only.
 
 **"Speak English"** is the
 phrase that works: from three English voices it arrived as スピークイングリッシュ
@@ -418,9 +427,9 @@ please" was not heard at all. Saying it in Japanese always works. The numbers ar
 [notes/languages-probe.md](notes/languages-probe.md).
 
 The languages are English, Spanish, French, German, Hindi, Russian, Portuguese,
-Japanese, Italian and Dutch: the ten `flux-general-multi` can hear. Flux TTS
-speaks 42, but a voice in a language the device cannot understand is a voice
-nobody can talk back to. Deepgram's Voice Agent page says the agent API takes
+Japanese, Italian and Dutch, the ten `flux-general-multi` can hear, and
+Bulgarian, which only Nova-3 hears. Flux TTS speaks 42, but a voice in a
+language the device cannot understand is a voice nobody can talk back to. Deepgram's Voice Agent page says the agent API takes
 English Flux voices only; on this account it took all nine others, measured
 with `host/agent_probe.py matrix`. See
 [notes/languages-probe.md](notes/languages-probe.md).
@@ -514,8 +523,8 @@ API key is not in the body; it rides in an HTTP header.
 
 ### The catalog
 
-All 149 voices live in [main/voices.c](../main/voices.c): 36 English and 113
-across the other nine languages. The model sees three layers:
+All 151 voices live in [main/voices.c](../main/voices.c): 36 English and 115
+across the other ten languages. The model sees three layers:
 
 - **`set_voice`'s description** names the 13 featured English voices, names
   only, and one featured voice per other language ("Spanish (carmen)"), so "a
@@ -537,7 +546,8 @@ branch 20,445 B with an English voice (−240) and 20,584 B with a Japanese one
 (−101).
 
 `host/voices.sh` checks the table: unique short names across languages, every
-model id `flux-<name>-<lang>`, every language one Flux STT can hear, one featured
+model id `flux-<name>-<lang>`, every language one the device can hear (with
+`multi` matching the ten `flux-general-multi` takes), one featured
 voice per language, and text that fits its buffers. `host/agent_probe.py catalog`
 synthesises every model id, so a typo fails on a laptop rather than on a device.
 

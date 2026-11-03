@@ -171,10 +171,51 @@ it was 3 s later -- the server finishes queued audio first. The firmware's
 missing-acknowledgement timer therefore waits only on `ListenUpdated` and
 `PromptUpdated`.
 
+## Bulgarian, through Nova-3 only
+
+Added 2026-10-29, after "speak Bulgarian" was refused on the board. Deepgram's
+[Flux TTS voices page](https://developers.deepgram.com/docs/flux-tts/voices)
+lists Bulgarian in Early Access with two voices, `flux-desislava-bg` and
+`flux-gergana-bg`, both women. Both synthesise through `/v2/speak`.
+
+`flux-general-multi` cannot be the listen side:
+
+| listen | heard "Коя е столицата на Франция?" as |
+|---|---|
+| `flux-general-multi`, hints `[bg, en]` | nothing: `INTERNAL_SERVER_ERROR` (1 of 1; with English requests, 7 of 9, the other 2 heard nothing) |
+| `flux-general-multi`, hints `[en]` | "Korea's toilet is in Francia." |
+| `flux-general-multi`, no hints | "Goeiaar, stolit het in Francia?" (answered in Dutch) |
+| Nova-3, `language: bg` | Коя е столицата на Франция? (2 of 2) |
+
+So Bulgarian listens with Nova-3 like Japanese, and `language_t.multi` is false
+for it: the Nova-3 fallback hints English alone rather than send a hint that
+fails the session. A fallback session in Bulgarian hears English only.
+
+`matrix` with `flux-desislava-bg`: `both` and `listen` heard the question word
+for word and answered "Столицата на Франция е Париж." with audio; `speak`
+(English STT) heard "Guillaire stole it at the novante." as expected.
+
+**English through Nova-3 `bg`** comes out half Cyrillic. From kit, cliff and
+hannah: "Speak English" as `Speedк`, `Спик English.`, `Спик,`; "Switch to
+Hannah" as `Суичтахана!`, `Свичте хена.`, `Switched Hera.`; "English, please"
+as `English Plays`, `English prease`, `English Please,`. Injected into the
+Agent API with the device's prompt, Bulgarian language line and voice tools,
+7 of 9 requests landed: "Speak Bulgarian", "Can you talk to me in Bulgarian?"
+and "Switch to Gergana" from English; `Спик English.`, both "English please"
+garbles and "Говори на английски." back. The misses were `Speedк` and
+`Суичтахана!`, which nothing could read as English. The Japanese line about
+garbled English is reused unchanged.
+
+**No text normalisation**, per Deepgram's page: numbers and symbols are read as
+written. Transcribing the voice's own output with Nova-3, digits read fine
+("14:30" as четиринадесет и трийсет, "7 ч." as седем часа) but "°C" did not.
+The model already writes these out in words under the existing prompt ("сто
+градуса по Целзий", three of three questions), so nothing was added for it.
+
 ## Every model id
 
 `host/agent_probe.py catalog` synthesised one word with every model id in
-`main/voices.c` through `/v2/speak`: 149 voices, none refused. That checks the
+`main/voices.c` through `/v2/speak`: 149 voices, none refused (before Bulgarian's two). That checks the
 ids exist; it does not re-check the Agent API, which `matrix` covered one voice
 per language.
 

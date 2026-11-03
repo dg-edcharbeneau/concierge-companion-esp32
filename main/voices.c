@@ -19,10 +19,11 @@ static const char *TAG = "voices";
 #define VOICE_MODEL_MAX 24
 
 /*
- * The languages, in the order the model hears them listed. Each is one Flux STT
- * can hear (flux-general-multi) AND one the Agent API took a Flux voice in when
- * host/agent_probe.py last ran -- see docs/notes/languages-probe.md. Adding one
- * is a row here, its voices below, and a re-run of the probe.
+ * The languages, in the order the model hears them listed. Each is one the
+ * device can hear (flux-general-multi, or Nova-3 for a `nova` row) AND one the
+ * Agent API took a Flux voice in when host/agent_probe.py last ran -- see
+ * docs/notes/languages-probe.md. Adding one is a row here, its voices below,
+ * and a re-run of the probe.
  *
  * The greetings stand in for CONFIG_DEEPGRAM_AGENT_GREETING, which is English
  * and would otherwise be the first thing a Spanish voice says. They want a
@@ -37,18 +38,27 @@ static const char *TAG = "voices";
  * at all, so the prompt line tells the model what English looks like when it
  * does arrive. `multi` heard English fine but Japanese worse, which defeats the
  * point.
+ *
+ * BULGARIAN LISTENS WITH NOVA-3 BECAUSE NOTHING ELSE HEARS IT. Flux TTS has two
+ * Bulgarian voices (Early Access); flux-general-multi does not take a "bg"
+ * hint -- the Agent API answers INTERNAL_SERVER_ERROR -- and with only "en"
+ * hinted it hears Bulgarian as English nonsense. Nova-3 `bg` heard the probe
+ * question word for word. Its English is like Japanese's ("Speak English" as
+ * "Спик English"), and `multi` false keeps "bg" out of the Nova-3 fallback's
+ * hints, so a fallback session hears English only.
  */
 static const language_t s_languages[] = {
-    { "en", "English",    NULL,                                                         false },
-    { "es", "Spanish",    "Aquí estoy. Háblame como a una persona.",                    false },
-    { "fr", "French",     "Je suis là. Parle-moi simplement, comme à une personne.",    false },
-    { "de", "German",     "Ich bin da. Sprich einfach mit mir wie mit einem Menschen.", false },
-    { "hi", "Hindi",      "मैं यहाँ हूँ। मुझसे किसी इंसान की तरह बात करो।",                 false },
-    { "ru", "Russian",    "Я здесь. Просто говори со мной, как с человеком.",           false },
-    { "pt", "Portuguese", "Estou aqui. Fale comigo como se fala com uma pessoa.",       false },
-    { "ja", "Japanese",   "はい、ここにいます。普通に話しかけてください。",                 true  },
-    { "it", "Italian",    "Sono qui. Parlami come parleresti a una persona.",           false },
-    { "nl", "Dutch",      "Ik ben er. Praat gewoon met me zoals met een mens.",         false },
+    { "en", "English",    NULL,                                                         false, true },
+    { "es", "Spanish",    "Aquí estoy. Háblame como a una persona.",                    false, true },
+    { "fr", "French",     "Je suis là. Parle-moi simplement, comme à une personne.",    false, true },
+    { "de", "German",     "Ich bin da. Sprich einfach mit mir wie mit einem Menschen.", false, true },
+    { "hi", "Hindi",      "मैं यहाँ हूँ। मुझसे किसी इंसान की तरह बात करो।",                 false, true },
+    { "ru", "Russian",    "Я здесь. Просто говори со мной, как с человеком.",           false, true },
+    { "pt", "Portuguese", "Estou aqui. Fale comigo como se fala com uma pessoa.",       false, true },
+    { "ja", "Japanese",   "はい、ここにいます。普通に話しかけてください。",                 true,  true },
+    { "it", "Italian",    "Sono qui. Parlami come parleresti a una persona.",           false, true },
+    { "nl", "Dutch",      "Ik ben er. Praat gewoon met me zoals met een mens.",         false, true },
+    { "bg", "Bulgarian",  "Тук съм. Просто ми говори като на човек.",                   true,  false },
 };
 
 #define LANGUAGE_COUNT (sizeof(s_languages) / sizeof(s_languages[0]))
@@ -242,6 +252,10 @@ static const voice_t s_voices[] = {
     { "lotte",     "flux-lotte-nl",      "Flemish woman",                              "nl", false },
     { "niels",     "flux-niels-nl",      "Flemish man",                                "nl", false },
     { "veerle",    "flux-veerle-nl",     "Flemish woman",                              "nl", false },
+
+    /* Bulgarian */
+    { "desislava", "flux-desislava-bg",  "Bulgarian woman",                            "bg", true  },
+    { "gergana",   "flux-gergana-bg",    "Bulgarian woman",                            "bg", false },
 };
 
 #define VOICE_COUNT (sizeof(s_voices) / sizeof(s_voices[0]))
@@ -505,20 +519,30 @@ void voices_language_note(char *out, size_t out_len)
         return;
     }
     const language_t *l = voices_language(voices_current());
-    if (voices_is_english(l)) {
-        out[0] = '\0';
-        return;
-    }
+    /* English too. Without it, "Can you speak Spanish?" from an English
+     * session got "Sí, claro" in the English voice and no set_voice: replaying
+     * the board's own Settings from a laptop, 5 of 16 "Can you speak X?"
+     * requests answered in X without changing voice, and 0 of 16 with this
+     * line (2026-11-03). */
     /* English stays welcome because it stays in language_hints: "switch back to
      * English" has to be both heard and obeyed. */
     /* The leading space is the join: the placeholder sits straight after a
-     * full stop, so English leaves that sentence exactly as it was. */
-    /* Terse on purpose: this rides in every Settings message. */
-    int n = snprintf(out, out_len, " Reply in %s unless asked otherwise.", l->name);
+     * full stop. */
+    /* Terse on purpose: this rides in every Settings message.
+     *
+     * "Only", and the way out named, because "Reply in Bulgarian unless asked
+     * otherwise" read as leave to answer in English without changing voice:
+     * on the board, "Английски" got "Okay, switching to English" in the
+     * Bulgarian voice and no set_voice, twice. Replaying the board's own
+     * Settings from a laptop, the old line missed 1 of 12 language changes
+     * ("О, да, мога и на английски") and this one 0 of 12. */
+    int n = snprintf(out, out_len, " Reply only in %s; for any other language, call "
+                     "set_voice first.", l->name);
     if (l->nova && n > 0 && (size_t)n < out_len) {
         /* Nova-3 in `ja` spells English out ("Speak English" came back as
-         * "peakenglish") or drops it, and this is the user's only way home
-         * without a word of Japanese. */
+         * "peakenglish") or drops it, and in `bg` writes it half in Cyrillic
+         * ("Спик English"); this is the user's only way home without a word
+         * of either. */
         snprintf(out + n, out_len - (size_t)n,
                  " English may arrive garbled, like peakenglish; a request for "
                  "English means switch voice.");

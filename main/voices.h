@@ -14,11 +14,11 @@
  * what to speak, and the greeting. There is no separate language setting to
  * disagree with the voice.
  *
- * Only languages Flux STT can hear are here -- the ten flux-general-multi
- * covers. Flux TTS speaks many more, but a voice in a language the device
- * cannot understand is a voice nobody can talk back to. One of the ten,
- * Japanese, listens with Nova-3 instead, because flux-general-multi heard it
- * too poorly; see `nova` and docs/notes/languages-probe.md.
+ * Only languages the device can hear are here: the ten flux-general-multi
+ * covers, plus Bulgarian, which only Nova-3 hears. Flux TTS speaks many more,
+ * but a voice in a language the device cannot understand is a voice nobody can
+ * talk back to. Japanese listens with Nova-3 too, because flux-general-multi
+ * heard it too poorly; see `nova` and docs/notes/languages-probe.md.
  *
  * WHY THE VOICE IS NOT JUST A KCONFIG STRING ANY MORE
  *
@@ -39,6 +39,7 @@ typedef struct {
     const char *name;      /* "Spanish" -- for the prompt and tool text */
     const char *greeting;  /* spoken on a fresh session; NULL = the Kconfig greeting */
     bool nova;             /* listen with Nova-3 in this language, not flux-general-multi */
+    bool multi;            /* flux-general-multi hears it, so its fallback may hint it */
 } language_t;
 
 typedef struct {
@@ -106,8 +107,8 @@ void voices_list(const language_t *lang, char *out, size_t out_len);
  * asked what it runs on. Same contract as voices_describe(). */
 void voices_listen_model_name(char *out, size_t out_len);
 
-/* The {{language}} line for the active voice: empty for English, otherwise the
- * instruction to speak that language, with a leading space. Same contract as
+/* The {{language}} line for the active voice: the instruction to speak its
+ * language and to call set_voice for any other, with a leading space. Same contract as
  * voices_describe(), so it slots straight into agent_prompt.c's placeholder
  * table. */
 void voices_language_note(char *out, size_t out_len);
