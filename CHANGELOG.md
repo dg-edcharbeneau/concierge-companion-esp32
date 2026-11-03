@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-03
+
+Experimental pre-release. Verified on one bench board through logs, host
+harnesses and `host/voice_demo.sh`, which talks the board through language
+changes from a laptop speaker. Known issues: in Japanese, streaming Nova-3
+often loses the leading 英語 of "英語でお願いします" once the session has had a
+Japanese turn, so the way back to English can take a second ask (a Deepgram
+STT behaviour, reproduced off the board); Bulgarian voices are Flux TTS Early
+Access; the Echo callout variety and a win at level 99 have not been heard on
+the board.
+
 ### Added
 
 - **Echo, with the agent calling the levels.** A memory game after Ed's
