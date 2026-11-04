@@ -1,0 +1,43 @@
+menu "Concierge Companion"
+
+    config CONCIERGE_ENABLE
+        bool "Connect the agent to the Hotel Concierge"
+        default y
+        help
+            Adds the ask_concierge function and swaps the persona's identity and
+            boundaries blocks for the concierge versions. Off builds the upstream
+            dg-agent behaviour unchanged.
+
+    config CONCIERGE_BASE_URL
+        string "Concierge base URL (first-boot seed)"
+        depends on CONCIERGE_ENABLE
+        default ""
+        help
+            The concierge Web app's public HTTPS origin, for example the Aspire
+            api-tunnel URL (https://<id>-<port>.<region>.devtunnels.ms). No
+            trailing path. Same precedence rule as the API key: a value saved
+            through the setup portal wins over this one.
+
+    config CONCIERGE_GUEST_LAST_NAME
+        string "Guest last name (first-boot seed)"
+        depends on CONCIERGE_ENABLE
+        default ""
+
+    config CONCIERGE_GUEST_ROOM
+        string "Guest room number (first-boot seed)"
+        depends on CONCIERGE_ENABLE
+        default ""
+        help
+            1-4 digits, no leading zero, matching the concierge's RoomNumberFormat.
+
+    config CONCIERGE_TURN_TIMEOUT_MS
+        int "Concierge turn timeout (ms)"
+        depends on CONCIERGE_ENABLE
+        range 5000 60000
+        default 25000
+        help
+            How long ask_concierge waits for POST /api/concierge/turns. Voice turns
+            have been measured at up to ~17 s end to end (concierge ADR 0008), so
+            this leaves margin without letting a dead tunnel hang the turn.
+
+endmenu

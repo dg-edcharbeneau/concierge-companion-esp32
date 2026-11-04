@@ -89,6 +89,7 @@ idf_component_register(
         espressif__esp-dsp
         espressif__esp-sr
         espressif__button
+        concierge  # concierge-companion
 )
 
 # Minify the portal page into the build directory before it is embedded, so the

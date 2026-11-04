@@ -1,3 +1,6 @@
+<!-- concierge-companion: banner; keep on upstream merges (see UPSTREAM.md). -->
+> **Hotel Concierge companion.** This repo is based on [esp32-deepgram-voice-agent](https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent) and adds an `ask_concierge` function that connects the device to the Hotel ZGY concierge. Setup: [docs/concierge.md](docs/concierge.md). Pulling upstream updates: [UPSTREAM.md](UPSTREAM.md).
+
 <p align="center">
   <img src="docs/images/readme-header.svg" alt="Deepgram" width="100%">
 </p>

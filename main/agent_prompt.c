@@ -42,6 +42,16 @@ PROMPT_BLOCK(full_duplex_md);
 #endif
 PROMPT_BLOCK(boundaries_md);
 PROMPT_BLOCK(session_md);
+/* concierge-companion: identity and boundaries come from components/concierge. */
+#if CONFIG_CONCIERGE_ENABLE
+PROMPT_BLOCK(concierge_identity_md);
+PROMPT_BLOCK(concierge_boundaries_md);
+#define IDENTITY_BLOCK   concierge_identity_md_start,   concierge_identity_md_end
+#define BOUNDARIES_BLOCK concierge_boundaries_md_start, concierge_boundaries_md_end
+#else
+#define IDENTITY_BLOCK   identity_md_start,   identity_md_end
+#define BOUNDARIES_BLOCK boundaries_md_start, boundaries_md_end
+#endif
 
 typedef struct {
     const char *start;
@@ -61,7 +71,7 @@ typedef struct {
  */
 static const block_t s_blocks[] = {
     { formatting_md_start,   formatting_md_end,   false },
-    { identity_md_start,     identity_md_end,     false },
+    { IDENTITY_BLOCK,                             false }, /* concierge-companion */
     { conversation_md_start, conversation_md_end, false },
     { speaking_md_start,     speaking_md_end,     false },
     { substance_md_start,    substance_md_end,    false },
@@ -88,7 +98,7 @@ static const block_t s_blocks[] = {
 #else
     { full_duplex_md_start,  full_duplex_md_end,  false },
 #endif
-    { boundaries_md_start,   boundaries_md_end,   false },
+    { BOUNDARIES_BLOCK,                           false }, /* concierge-companion */
     { session_md_start,      session_md_end,      false },
 };
 

@@ -1,0 +1,18 @@
+# Concierge companion defaults, layered over upstream's sdkconfig.defaults by
+# the top-level CMakeLists.txt. Kept in its own file so upstream edits to
+# sdkconfig.defaults merge without conflicts.
+#
+# Never put a Deepgram key, Wi-Fi password, guest name or room here: this file
+# is committed. Use the setup portal, or `idf.py menuconfig` (sdkconfig is
+# gitignored).
+
+CONFIG_CONCIERGE_ENABLE=y
+CONFIG_CONCIERGE_TURN_TIMEOUT_MS=25000
+
+# Spoken aloud and shown nowhere else; the saved name still wins once a guest
+# renames the device by voice.
+CONFIG_AGENT_NAME="Zee"
+CONFIG_DEEPGRAM_AGENT_GREETING="Hi, I'm Zee, your concierge. What can I do for you?"
+
+# Warmer than the Deepgram fuchsia, for a hotel room.
+CONFIG_UI_DEFAULT_ORB_COLOR_BRASS=y

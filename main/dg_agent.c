@@ -31,6 +31,9 @@
 #include "session_ctl.h"
 #include "ui.h"
 #include "voices.h"
+#if CONFIG_CONCIERGE_ENABLE
+#include "concierge.h" /* concierge-companion */
+#endif
 
 static const char *TAG = "dg_agent";
 
@@ -1372,6 +1375,25 @@ static void send_function_response(const char *id, const char *name, const char 
     cJSON_Delete(root);
 }
 
+#if CONFIG_CONCIERGE_ENABLE
+/*
+ * concierge-companion: ask_concierge answers arrive from the concierge task,
+ * seconds later and possibly after this connection was replaced. A function id
+ * from an old session sent into a new one comes back as a server Error, so an
+ * answer is only delivered to the connection that asked (same Welcome
+ * request_id). Sending from another task is safe: the client lock is shared.
+ */
+static void concierge_reply(const char *session_tag, const char *id, const char *name,
+                            const char *content)
+{
+    if (!s_ready || strcmp(session_tag, s_request_id) != 0) {
+        ESP_LOGW(TAG, "concierge answer for a closed session dropped");
+        return;
+    }
+    send_function_response(id, name, content);
+}
+#endif
+
 
 /*
  * agent.listen.provider and agent.speak.provider, built in one place each.
@@ -1885,6 +1907,16 @@ static void handle_function_call(const cJSON *root)
         }
 
         char content[128];
+
+#if CONFIG_CONCIERGE_ENABLE
+        if (concierge_tool_is(name->valuestring)) { /* concierge-companion */
+            const cJSON *a = cJSON_GetObjectItemCaseSensitive(fn, "arguments");
+            concierge_tool_handle_async(s_request_id, id->valuestring, name->valuestring,
+                                        cJSON_IsString(a) ? a->valuestring : NULL,
+                                        concierge_reply);
+            continue;
+        }
+#endif
 
 #if CONFIG_CLOCK
         if (clock_tool(name->valuestring, fn, id->valuestring)) {
@@ -2975,6 +3007,9 @@ static esp_err_t send_settings(void)
 #endif
 #if CONFIG_ECHO
     add_raw_reference(functions, ECHO_TOOL);
+#endif
+#if CONFIG_CONCIERGE_ENABLE
+    concierge_tool_add_definition(functions); /* concierge-companion */
 #endif
 
     /* Omitting agent.speak entirely would also get Flux with flux-kit-en, but

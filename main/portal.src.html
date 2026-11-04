@@ -14,7 +14,8 @@
 
   Two endpoints back it, both in wifi_prov.c:
     GET  /scan  -> {"key_set":bool,"nets":[{"ssid","rssi","open"},...]}
-    POST /save  -> form-urlencoded ssid, pass, key; saves and reboots
+    POST /save  -> form-urlencoded ssid, pass, key, tz, and (concierge-companion)
+                   cg_url, cg_last, cg_room; saves and reboots
 
   To preview a change without flashing: open this file in a browser. The /scan
   fetch fails, so you get the scan-failed fallback with the manual SSID box
@@ -105,6 +106,17 @@ spellcheck='false' placeholder='e.g. America/Chicago'>
 <p class='hint'>For the clock and alarms. Filled in from this phone; you can also
 change it later by asking the device.</p>
 
+<!-- concierge-companion: the hotel this device answers for. Blank keeps what is saved. -->
+<label for='cgurl'>Concierge address</label>
+<input type='text' id='cgurl' inputmode='url' autocapitalize='none' autocorrect='off'
+spellcheck='false' placeholder='https://...devtunnels.ms'>
+<label for='cglast'>Guest last name</label>
+<input type='text' id='cglast' autocorrect='off' spellcheck='false'>
+<label for='cgroom'>Room number</label>
+<input type='text' id='cgroom' inputmode='numeric' pattern='[1-9][0-9]{0,3}'>
+<p class='hint'>From the concierge's Aspire dashboard (api-tunnel) and the guest's
+check-in. Leave blank to keep what is saved.</p>
+
 <button type='submit' id='go'>Save and connect</button>
 </form>
 <div id='msg'></div>
@@ -145,10 +157,17 @@ headers:{'Content-Type':'application/x-www-form-urlencoded'},
 body:'ssid='+encodeURIComponent(s)+'&pass='+
 encodeURIComponent(document.getElementById('pass').value)+'&key='+
 encodeURIComponent(document.getElementById('key').value.trim())+'&tz='+
-encodeURIComponent(document.getElementById('tz').value.trim())})
-.then(function(){msg.textContent='Saved. Restarting to join '+s+'. '
+encodeURIComponent(document.getElementById('tz').value.trim())+'&cg_url='+
+encodeURIComponent(document.getElementById('cgurl').value.trim())+'&cg_last='+
+encodeURIComponent(document.getElementById('cglast').value.trim())+'&cg_room='+
+encodeURIComponent(document.getElementById('cgroom').value.trim())})
+.then(function(r){
+/* concierge-companion: surface the device's 400 reason (bad room, bad URL)
+ * instead of reporting every answer as saved. */
+if(!r.ok)return r.text().then(function(t){throw new Error(t)});
+msg.textContent='Saved. Restarting to join '+s+'. '
 +'This page will stop responding, and the setup network will disappear.'})
-.catch(function(){msg.textContent='Save failed. Try again.';
+.catch(function(x){msg.textContent=(x&&x.message?x.message+'. ':'Save failed. ')+'Try again.';
 document.getElementById('go').disabled=false})};
 </script>
 

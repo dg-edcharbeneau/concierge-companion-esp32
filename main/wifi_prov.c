@@ -18,6 +18,9 @@
 #include "clock.h"
 #include "wifi_creds.h"
 #include "wifi_prov.h"
+#if CONFIG_CONCIERGE_ENABLE
+#include "concierge.h" /* concierge-companion */
+#endif
 
 static const char *TAG = "wifi_prov";
 
@@ -214,7 +217,49 @@ static bool form_get(const char *body, const char *key, char *out, size_t outlen
  * Cap on a /save body. Not tight: it only has to exclude something absurd, and
  * the buffer is heap-allocated per request rather than reserved.
  */
-#define BODY_MAX 1024
+#define BODY_MAX 3072 /* concierge-companion: was 1024; URL, last name and room ride along */
+
+#if CONFIG_CONCIERGE_ENABLE
+/*
+ * concierge-companion: the setup page's three concierge fields. Heap-held for
+ * the same stack reason as the body, and parsed into buffers wider than what is
+ * stored so an over-long value is refused instead of silently truncated.
+ */
+typedef struct {
+    char url[CONCIERGE_URL_LEN + 64];
+    char last[CONCIERGE_LAST_NAME_LEN + 64];
+    char room[16];
+} cg_fields_t;
+
+static const char *cg_parse(const char *body, cg_fields_t *f)
+{
+    form_get(body, "cg_url", f->url, sizeof(f->url));
+    form_get(body, "cg_last", f->last, sizeof(f->last));
+    form_get(body, "cg_room", f->room, sizeof(f->room));
+    if (f->url[0] != '\0') {
+        if (strncmp(f->url, "https://", 8) != 0) {
+            return "the concierge address must start with https://";
+        }
+        if (strlen(f->url) >= CONCIERGE_URL_LEN) {
+            return "the concierge address is too long";
+        }
+    }
+    if (strlen(f->last) >= CONCIERGE_LAST_NAME_LEN) {
+        return "the last name is too long";
+    }
+    if (f->room[0] != '\0') {
+        size_t n = strlen(f->room);
+        bool digits = n >= 1 && n <= 4 && f->room[0] != '0';
+        for (size_t i = 0; digits && i < n; i++) {
+            digits = f->room[i] >= '0' && f->room[i] <= '9';
+        }
+        if (!digits) {
+            return "the room number must be 1 to 4 digits with no leading zero";
+        }
+    }
+    return NULL;
+}
+#endif
 
 /*
  * Whether a key is worth storing at all.
@@ -363,6 +408,24 @@ static esp_err_t save_handler(httpd_req_t *req)
     form_get(body, "pass", pass, sizeof(pass));
     form_get(body, "key", key, sizeof(key));
     form_get(body, "tz", tz, sizeof(tz));
+#if CONFIG_CONCIERGE_ENABLE
+    /*
+     * concierge-companion: parsed, saved and freed here, before the body is
+     * wiped, so none of the upstream early returns below can leak it. Blank
+     * means keep, like the key. Independent of the Wi-Fi fields, so saving them
+     * ahead of the Wi-Fi checks cannot leave a half-applied network.
+     */
+    const char *cg_err = "out of memory";
+    cg_fields_t *cg = calloc(1, sizeof(*cg));
+    if (cg != NULL) {
+        cg_err = cg_parse(body, cg);
+        if (cg_err == NULL && concierge_store_save(cg->url, cg->last, cg->room) != ESP_OK) {
+            cg_err = "the concierge details could not be saved";
+        }
+        memset(cg, 0, sizeof(*cg));
+        free(cg);
+    }
+#endif
     /* Nothing else needs the raw body, and it is the only place the key and the
      * password sit together. */
     memset(body, 0, BODY_MAX + 1);
@@ -374,6 +437,11 @@ static esp_err_t save_handler(httpd_req_t *req)
      * valid, so there is nothing for blank to be confused with. The page says so
      * when a key is stored, because blank has to look safe before anyone uses it.
      */
+#if CONFIG_CONCIERGE_ENABLE
+    if (cg_err != NULL) { /* concierge-companion */
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, cg_err);
+    }
+#endif
     if (key[0] != '\0' && !key_is_plausible(key)) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                                    "that key has spaces or control characters in it");
