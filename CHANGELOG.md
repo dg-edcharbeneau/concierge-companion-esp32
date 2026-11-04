@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The setup portal, the project site and the orb page wear Deepgram's 2026
+  brand.** Off-black and Off-white with Fuchsia (#E042FF) for the one action:
+  a Fuchsia pill with mono capitals, glass-edged fields and panels, and Work
+  Sans with Azeret Mono on the site (the portal keeps system fonts, since the
+  phone has no internet on the device's AP). The portal's heading is now "Set
+  up your agent". JS, fields and the `/scan` and `/save` contract are
+  unchanged; the minified page grows 10,478 → 10,712 B. Checked in
+  `host/portal.sh` and headless Chrome at 375 and 1280 px, not yet on a phone.
+- The site and README describe 0.11.0: 151 voices in eleven languages, the
+  seven brand colours, Echo, and a 1.93 MB image.
+
+### Fixed
+
+- `host/orb_web.html` still held the thirteen old orb colours, so rebuilding
+  `docs/orb.html` would have undone 0.11.0's palette. It now matches
+  `main/orb_colors.c`.
+
+### Known issues
+
+- The wordmark is still the old one everywhere (marked `TODO(brand-logo)`),
+  and so is the logo inside `docs/images/device-orb.png`, until the 2026 SVGs
+  are in the repo.
+
 ## [0.11.0] - 2026-11-03
 
 Experimental pre-release. Verified on one bench board through logs, host
