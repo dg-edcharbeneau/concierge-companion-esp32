@@ -16,7 +16,7 @@ the conversation. No phone, no laptop, no cloud glue in between — the board ho
 the session itself.
 
 <p align="center">
-  <img src="docs/images/device-orb.png" alt="The board mid-conversation, the orb face lit and labelled speaking" width="640">
+  <img src="docs/images/device-orb.gif" alt="The board mid-conversation, its fuchsia orb moving as it speaks" width="640">
 </p>
 
 Talk to it and it answers. Ask it to change its voice, its language, its name,

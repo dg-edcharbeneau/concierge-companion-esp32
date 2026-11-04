@@ -16,7 +16,7 @@
 <meta property="og:description" content="A voice agent that runs entirely on a $40 ESP32-S3 dev board. Mic to Deepgram to speaker, over one WebSocket.">
 <meta property="og:url" content="https://dg-edcharbeneau.github.io/esp32-deepgram-voice-agent/">
 <meta property="og:image" content="https://dg-edcharbeneau.github.io/esp32-deepgram-voice-agent/images/device-orb.png">
-<meta property="og:image:alt" content="The round device on a black surface, its display showing a sphere of blue dots.">
+<meta property="og:image:alt" content="The round device on a black surface, its display showing a sphere of fuchsia dots, under the Deepgram wordmark.">
 <meta name="twitter:card" content="summary_large_image">
 
 <!-- The kit's app icon: the wordmark's own D, Off-black on the Fuchsia-to-
@@ -246,7 +246,12 @@ footer a:hover,footer a:focus-visible{color:var(--fg)}
     </div>
     <div>
       <div class="hero-shot">
-        <img src="images/device-orb.png" width="960" height="780" alt="The round device on a black surface, its display showing a sphere of blue dots labelled speaking">
+        <!-- The GIF moves; anyone who has asked for less motion gets its first frame,
+             which is also the social card. -->
+        <picture>
+          <source media="(prefers-reduced-motion: reduce)" srcset="images/device-orb.png">
+          <img src="images/device-orb.gif" width="960" height="780" alt="The round device on a black surface, its display showing a sphere of fuchsia dots moving as it speaks, under the Deepgram wordmark">
+        </picture>
       </div>
       <p class="hero-cap">456 dots · 18 rings · drawn on-device</p>
     </div>
