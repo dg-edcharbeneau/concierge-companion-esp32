@@ -3,11 +3,11 @@
 ### → [**TLDR? See the project site**](https://dg-edcharbeneau.github.io/esp32-deepgram-voice-agent/)
 
 [![build](https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/actions/workflows/build.yml/badge.svg)](https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/actions/workflows/build.yml)
-[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![ESP-IDF](https://img.shields.io/badge/ESP--IDF-5.5.5-red.svg)](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32s3/index.html)
+[![license](https://img.shields.io/badge/license-Apache--2.0-E042FF.svg)](LICENSE)
+[![ESP-IDF](https://img.shields.io/badge/ESP--IDF-5.5.5-1D1D1D.svg)](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32s3/index.html)
 
-A complete voice agent running on a $40 dev board: **mic → Deepgram (STT / LLM /
-TTS) → speaker**, over a single WebSocket, with a 466×466 AMOLED that reacts to
+A complete voice agent running on a $40 dev board: **mic → Deepgram (speech-to-text, LLM,
+text-to-speech) → speaker**, over a single WebSocket, with a 466×466 AMOLED that reacts to
 the conversation. No phone, no laptop, no cloud glue in between — the board holds
 the session itself.
 
@@ -15,9 +15,11 @@ the session itself.
   <img src="docs/images/device-orb.png" alt="The board mid-conversation, the orb face lit and labelled speaking" width="640">
 </p>
 
-Talk to it and it answers. Ask it to change its voice, its name, its colour, or
-its face — or how much battery it has left, what time it is, or to wake you at
-seven — and it does: the agent has tools wired to the device's own hardware.
+Talk to it and it answers. Ask it to change its voice, its language, its name,
+its colour, or its face, to start a game of Echo, how much battery it has left,
+what time it is, or to wake you at seven, and it does: the agent has tools wired
+to the device's own hardware. It speaks eleven languages in 151 voices, and a
+voice change lands mid-conversation.
 
 ## The hardware
 
@@ -97,13 +99,21 @@ depth-sorted dots whose behaviour tracks the session state, and a **radial
 spectrum analyser** of 48 FFT bars. Both are drawn under a fixed RAM budget that
 the docs explain rather than assume — **[docs/display.md](docs/display.md)**.
 
-Charge shows as four dots following the display's outer curve, read from the
-board's AXP2101 fuel gauge and coloured to match the orb.
+The orb comes in seven colours from Deepgram's brand palette, Fuchsia by default;
+ask for one by name ("glass") or by plain word ("blue"). Charge shows as four dots
+following the display's outer curve, read from the board's AXP2101 fuel gauge and
+coloured to match the orb.
+
+**Echo** is a memory game on the panel: four quarter buttons in Phosphor, Clay,
+Brass and Glass, and the agent calling out each new level in its own words.
+Swipe to it from the stopwatch or say "let's play Echo" —
+**[docs/echo.md](docs/echo.md)**.
 
 ## Documentation
 
 | | |
 |---|---|
+| [docs/echo.md](docs/echo.md) | the memory game, how the agent calls its levels, and what it holds while it runs |
 | [docs/clock.md](docs/clock.md) | the clock, timezones, timers and alarms, and what happens when one rings |
 | [docs/architecture.md](docs/architecture.md) | the module map: what runs on which task, and the one rule the layout defends |
 | [docs/build.md](docs/build.md) | prerequisites, menuconfig, ports, and where every file lives |
@@ -114,14 +124,14 @@ board's AXP2101 fuel gauge and coloured to match the orb.
 | [docs/session-control.md](docs/session-control.md) | button, touch, the control task, and the idle timeout |
 | [docs/persistence.md](docs/persistence.md) | how a conversation outlives a reboot, and what it takes to forget one |
 | [docs/voice-commands.md](docs/voice-commands.md) | what the agent can change about itself, and what each change costs |
-| [docs/flux.md](docs/flux.md) | the Flux speech stack on this board |
+| [docs/flux.md](docs/flux.md) | the Deepgram Flux speech stack on this board |
 | [docs/protocol-notes.md](docs/protocol-notes.md) | Agent API and WebSocket lessons worth keeping |
 | [docs/tuning.md](docs/tuning.md) | speaker volume and the knobs worth turning |
 | [docs/notes/](docs/notes/) | historical findings: echo cancellation, `UpdateSpeak`, an upstream WebSocket bug |
 
 ## Host harnesses
 
-Six things run on a laptop with no board attached, and three of them are gates in
+Ten things run on a laptop with no board attached, and five of them are gates in
 CI:
 
 ```bash
@@ -131,6 +141,10 @@ CI:
 ./host/portal.sh     # opens the captive-portal page in a browser
 ./host/alarms.sh     # walks the alarm clock across both DST nights, and checks every timezone row against tzdata
 ./host/button.sh     # every way BOOT can be pressed while an alarm rings -- none of them may forget wi-fi
+./host/panel.sh      # every touch-panel control is hit where it is drawn, and the colour dial matches orb_colors.c
+./host/clock.sh      # the orb clock lights the right dots for a time
+./host/echo.sh       # Echo's sequence, timing, tones, callout wait and best level
+./host/voices.sh     # the voice catalog: unique names, model ids per language, text that fits its buffers
 ```
 
 See [host/README.md](host/README.md). The prompt itself is
