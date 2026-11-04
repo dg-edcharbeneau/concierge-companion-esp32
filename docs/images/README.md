@@ -2,7 +2,9 @@
 
 | File | What it is | Used by |
 |---|---|---|
-| `device-orb.png` | The board mid-reply, orb face lit and labelled `speaking`. | The README header. |
+| `brand/deepgram-wordmark.svg` | Deepgram's 2026 wordmark, `fill="currentColor"`. The source for every inlined copy: the portal, the site's nav, the favicon's D, and `readme-header.svg`. | Nothing directly; copy its paths. |
+| `readme-header.svg` | The wordmark in Off-black on the brand's Fuchsia-to-Off-white fade, nothing else beside it (the kit forbids lockups). | The top of `README.md`. |
+| `device-orb.png` | The board mid-reply, orb face lit and labelled `speaking`. Predates the 2026 brand: the old wordmark is in the image and the orb is the old blue. | The README and the site's hero and social card. |
 | `portal.png` | The captive-portal setup page, as a phone sees it after joining the device's AP. | The `Get one running` section of `docs/index.html`. |
 | `orb-states/` | Every orb state from the display test, three frames each about 1 s apart, captured from the device's canvas with `CONFIG_UI_SCREENSHOT_TOUR` and `host/shot2png.py`. `contact.png` is all of them on one sheet, a row per state. | The display test section of `docs/display.md`. |
 

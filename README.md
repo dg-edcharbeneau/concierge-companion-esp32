@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/readme-header.svg" alt="Deepgram" width="100%">
+</p>
+
 # ESP32 Deepgram Voice Agent
 
 ### → [**TLDR? See the project site**](https://dg-edcharbeneau.github.io/esp32-deepgram-voice-agent/)

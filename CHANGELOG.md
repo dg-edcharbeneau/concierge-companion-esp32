@@ -14,7 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Sans with Azeret Mono on the site (the portal keeps system fonts, since the
   phone has no internet on the device's AP). The portal's heading is now "Set
   up your agent". JS, fields and the `/scan` and `/save` contract are
-  unchanged; the minified page grows 10,478 → 10,712 B. Checked in
+  unchanged; the minified page goes 10,478 → 9,800 B, the new wordmark being the smaller path. Checked in
   `host/portal.sh` and headless Chrome at 375 and 1280 px, not yet on a phone.
 - The site and README describe 0.11.0: 151 voices in eleven languages, the
   seven brand colours, Echo, and a 1.93 MB image.
@@ -25,11 +25,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/orb.html` would have undone 0.11.0's palette. It now matches
   `main/orb_colors.c`.
 
+- **The 2026 wordmark** replaces the old one in the portal and the site's nav,
+  from `docs/images/brand/deepgram-wordmark.svg`. Its D goes on the favicon as
+  the kit's app icon, Off-black on the Fuchsia fade, and the README gains a
+  header of the wordmark alone on that fade.
+
 ### Known issues
 
-- The wordmark is still the old one everywhere (marked `TODO(brand-logo)`),
-  and so is the logo inside `docs/images/device-orb.png`, until the 2026 SVGs
-  are in the repo.
+- `docs/images/device-orb.png` still shows the old wordmark and the old blue
+  orb; it needs a new photograph.
 
 ## [0.11.0] - 2026-11-03
 
