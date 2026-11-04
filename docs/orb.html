@@ -11,26 +11,29 @@
 <meta name="description" content="The device's orb face running live in the browser, on the firmware's own geometry compiled to WebAssembly.">
 <meta name="color-scheme" content="dark">
 <!-- index.html's icon, so the two pages read as one site. -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3ClinearGradient id='g' x1='0' x2='1'%3E%3Cstop offset='0' stop-color='%23f3b6e0'/%3E%3Cstop offset='.33' stop-color='%23f7a878'/%3E%3Cstop offset='.66' stop-color='%23a8ecd3'/%3E%3Cstop offset='1' stop-color='%2338bdf8'/%3E%3C/linearGradient%3E%3Crect width='32' height='32' rx='7' fill='%230e0e10'/%3E%3Ccircle cx='16' cy='16' r='9' fill='url(%23g)'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='.45' stop-color='%23e042ff'/%3E%3Cstop offset='1' stop-color='%23fcfaf8'/%3E%3C/linearGradient%3E%3Ccircle cx='16' cy='16' r='16' fill='url(%23g)'/%3E%3Cpath transform='translate(7.6 7.95) scale(.66)' fill='%231d1d1d' d='M4.74627 15.3288V9.06525C4.74627 4.71301 3.95565 3.13177 0 2.30789L0.724094 0C3.75608 0.660128 5.17356 0.660128 6.59104 0.660128C7.74499 0.660128 8.89893 0.527079 10.0196 0.396588C11.1403 0.263539 12.261 0.133049 13.4482 0.133049C20.2721 0.133049 25.4482 5.20938 25.4482 12.1996C25.4482 19.1898 20.2721 24.2661 13.4482 24.2661C12.261 24.2661 11.1403 24.133 10.0196 24.0026C8.89893 23.8695 7.74499 23.739 6.59104 23.739C5.17356 23.739 3.75608 23.739 0.724094 24.3991L0 22.0913C3.95565 21.2674 4.74627 19.6836 4.74627 15.3339V15.3288ZM20.7045 12.197C20.7045 6.26354 18.0333 2.73518 13.4507 2.73518C10.6158 2.73518 8.83497 4.28571 8.83497 9.06525V15.3288C8.83497 20.1083 10.6158 21.6588 13.4507 21.6588C18.0333 21.6588 20.7045 18.1305 20.7045 12.197Z'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@700;900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@400;500&family=Work+Sans:wght@400;500;600&display=swap">
 <style>
 /* Layout: the round panel is the page; controls sit beside it like a bench, and
    every state runs live underneath. Single-theme, as index.html is: the board
    is a black disc and the dots only read on black. Values are index.html's;
-   the names are this page's (--ground is its --ink, --ink its --fg). */
+   the names are this page's (--ground is its --ink, --ink its --fg). The
+   brand is Deepgram's 2026 kit, as index.html's is; Fuchsia here is the one
+   fixed accent, the "Play every transition" button, since everything else
+   that lights up takes the orb's own colour. */
 :root {
-  --pink: #f3b6e0; --peach: #f7a878; --mint: #a8ecd3; --blue: #38bdf8;
-  --ground: #0e0e10;
-  --panel: #161619;
-  --rule: #26262b;
-  --ink: #f2f3f5;
-  --muted: #83858e;         /* index.html's --fg-faint: 5.2:1, the floor */
-  --tint: #f2f3f5;          /* the orb colour; set from script */
-  --font-display: Chivo, ui-sans-serif, system-ui, sans-serif;
-  --font-body: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
-  --font-data: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+  --fuchsia: #e042ff;
+  --ground: #1d1d1d;        /* Off-black */
+  --panel: #262626;         /* the glass panel over --ground, made solid for buttons */
+  --rule: rgba(252, 250, 248, 0.16);
+  --ink: #fcfaf8;           /* Off-white */
+  --muted: #8f8f8f;         /* index.html's --fg-faint: 5.2:1, the floor */
+  --tint: #e042ff;          /* the orb colour; set from script, Fuchsia at boot */
+  --font-display: "Work Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Work Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-data: "Azeret Mono", ui-monospace, SFMono-Regular, monospace;
   color-scheme: dark;
 }
 *, *::before, *::after { box-sizing: border-box; }
@@ -44,8 +47,6 @@ body {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
-/* index.html's bar, which the device's own portal wears too. */
-.hair { height: 4px; background: linear-gradient(90deg, var(--pink), var(--peach), var(--mint), var(--blue)); }
 .wrap {
   max-width: 1120px; margin: 0 auto; display: grid; gap: 36px;
   padding-left: max(16px, env(safe-area-inset-left, 0px));
@@ -58,7 +59,7 @@ nav a:hover, nav a:focus-visible { color: var(--ink); }
 footer a { color: var(--ink); }
 
 header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
-h1 { font-family: var(--font-display); font-weight: 900; font-size: clamp(28px, 4vw, 40px); line-height: 1.05; letter-spacing: -0.02em; margin: 0; text-wrap: balance; }
+h1 { font-family: var(--font-display); font-weight: 500; font-size: clamp(28px, 4vw, 40px); line-height: 1.05; letter-spacing: -0.02em; margin: 0; text-wrap: balance; }
 .sub { color: var(--muted); margin: 0; max-width: 62ch; }
 .sub code { font-family: var(--font-data); font-size: 13px; color: var(--ink); }
 
@@ -72,7 +73,7 @@ h1 { font-family: var(--font-display); font-weight: 900; font-size: clamp(28px, 
   max-width: 100%;
   border-radius: 50%;
   padding: 14px;
-  background: radial-gradient(circle at 50% 35%, #2a2d34, #15171b 70%);
+  background: radial-gradient(circle at 50% 35%, #2e2e2e, #161616 70%);
   box-shadow: 0 0 0 1px var(--rule), 0 30px 80px -30px #000;
   box-sizing: border-box;
 }
@@ -102,18 +103,18 @@ button, .seg label {
   padding: 7px 11px; cursor: pointer; text-align: left;
   transition: border-color 120ms, background 120ms;
 }
-button:hover, .seg label:hover { border-color: #3a3e48; }
+button:hover, .seg label:hover { border-color: var(--muted); }
 button:focus-visible, .seg input:focus-visible + span, input[type=range]:focus-visible, .swatch:focus-visible {
   outline: 2px solid var(--tint); outline-offset: 2px;
 }
 .states button { display: flex; align-items: center; gap: 9px; }
 .states button .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--rule); flex: none; }
-.states button[aria-pressed="true"] { border-color: var(--tint); background: #181b21; }
+.states button[aria-pressed="true"] { border-color: var(--tint); background: #2c2c2c; }
 .states button[aria-pressed="true"] .dot { background: var(--tint); box-shadow: 0 0 8px var(--tint); }
 .seg label { display: inline-flex; padding: 0; }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
 .seg span { padding: 6px 11px; border-radius: 7px; }
-.seg input:checked + span { background: #1d2028; box-shadow: inset 0 0 0 1px var(--tint); }
+.seg input:checked + span { background: #333333; box-shadow: inset 0 0 0 1px var(--tint); }
 
 .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 input[type=range] { flex: 1; min-width: 140px; accent-color: var(--tint); }
@@ -129,8 +130,13 @@ input[type=range] { flex: 1; min-width: 140px; accent-color: var(--tint); }
 .swatch[aria-pressed="true"] { border-color: var(--ground); box-shadow: 0 0 0 2px var(--ink); }
 .colorname { font-family: var(--font-data); font-size: 12.5px; color: var(--muted); }
 
-.primary { background: var(--ink); color: var(--ground); border-color: var(--ink); font-weight: 600; }
-.primary:hover { border-color: var(--ink); opacity: 0.9; }
+/* The kit's primary pill: Off-black on Fuchsia, 5.1:1. */
+.primary {
+  background: var(--fuchsia); color: var(--ground); border-color: var(--fuchsia); border-radius: 999px;
+  font-family: var(--font-data); font-size: 12px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 10px 18px; text-align: center;
+}
+.primary:hover { border-color: var(--fuchsia); filter: brightness(1.07); }
 
 .all h2 { font-family: var(--font-data); font-weight: 400; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 0 0 14px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 18px 14px; }
@@ -147,7 +153,6 @@ footer code { font-family: var(--font-data); font-size: 12px; color: var(--ink);
 </style>
 </head>
 <body>
-<div class="hair"></div>
 <div class="wrap">
   <nav>
     <a href="./">← Deepgram Agent Device</a>
