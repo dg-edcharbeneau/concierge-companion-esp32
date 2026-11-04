@@ -16,7 +16,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   up your agent". JS, fields and the `/scan` and `/save` contract are
   unchanged; the minified page goes 10,478 → 9,800 B, the new wordmark being
   the smaller path. Checked in `host/portal.sh` and headless Chrome at 375 and
-  1280 px, not yet on a phone.
+  1280 px, and on the bench board with a phone: provisioned through the new
+  page, rebooted onto the network (ch 6, -58 dBm) and greeted.
 - **The 2026 wordmark** replaces the old one in the portal and the site's nav,
   from `docs/images/brand/deepgram-wordmark.svg`. Its D goes on the favicon as
   the kit's app icon, Off-black on the Fuchsia fade, and the README gains a
