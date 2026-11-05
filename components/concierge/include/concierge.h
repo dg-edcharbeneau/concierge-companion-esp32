@@ -40,6 +40,14 @@ void concierge_tool_add_definition(cJSON *functions);
 bool concierge_tool_is(const char *name);
 
 /*
+ * What the device says while the desk works, injected with behavior "queue"
+ * (Deepgram's recommended filler for a pending function call). The model was
+ * told to say one itself and on the bench never did: gpt-5.4-mini emits the
+ * call with no text, leaving 5-7 s of silence. Under 64 bytes (ANNOUNCE_MAX).
+ */
+#define CONCIERGE_HOLDING_LINE "One moment, let me check with the desk."
+
+/*
  * Called once per answer, from the concierge worker task -- not the WebSocket
  * task. `session_tag` is the value passed to concierge_tool_handle_async(), so
  * the caller can drop an answer whose agent connection has since been replaced.
@@ -55,3 +63,10 @@ typedef void (*concierge_reply_fn)(const char *session_tag, const char *id,
  */
 void concierge_tool_handle_async(const char *session_tag, const char *id, const char *name,
                                  const char *arguments_json, concierge_reply_fn reply);
+
+/*
+ * Deepgram's FunctionCallCancelled (sent on barge-in). A call still queued never
+ * runs; one in flight finishes its HTTPS turn -- the stay workflow keeps it in
+ * the transcript -- but its answer is not sent. Unknown ids are ignored.
+ */
+void concierge_tool_cancel(const char *id);

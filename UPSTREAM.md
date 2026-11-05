@@ -41,7 +41,8 @@ Everything companion-specific lives in files that upstream doesn't have, so
 those files can't conflict:
 
 - `components/concierge/`: the component (Kconfig, NVS settings, HTTPS client, `ask_concierge`, prompt blocks)
-- `sdkconfig.defaults.concierge`: name, greeting, orb colour and concierge defaults
+- `sdkconfig.defaults.concierge`: name, greeting, orb colour, concierge defaults, the extra TLS root for dev tunnels, and `AUDIO_PA_IDLE_OFF_MS=60000`. That last line is redundant once PR #14 merges, since it changes the upstream default.
+- `components/concierge/certs/microsoft_tls_rsa_root_g2.pem`: added to the CA bundle (see docs/concierge.md)
 - `docs/concierge.md`, `UPSTREAM.md`
 
 Every edit to an upstream file is marked `concierge-companion`. Find them with
@@ -53,7 +54,8 @@ These are the only places a merge can conflict:
 | `CMakeLists.txt` | `SDKCONFIG_DEFAULTS` adds `sdkconfig.defaults.concierge` | Keep both files in the list. |
 | `main/CMakeLists.txt` | `REQUIRES ... concierge` | Re-add the line. |
 | `main/agent_prompt.c` | `identity.md` and `boundaries.md` are swapped for the concierge blocks when `CONFIG_CONCIERGE_ENABLE` | Keep the macros. If upstream rewrote those two blocks, decide whether the concierge versions need the same change. |
-| `main/dg_agent.c` | Include `concierge.h`, `concierge_reply()` after `send_function_response()`, a dispatch branch at the top of `handle_function_call()`, and `concierge_tool_add_definition()` after the Echo tool in `send_settings()` | Re-apply each hook next to its neighbour. The dispatch branch has to come before the clock and voice handlers. |
+| `main/dg_agent.c` | Include `concierge.h`; `concierge_reply()` after `send_function_response()`; a dispatch branch at the top of `handle_function_call()`, which also queues the holding line with `dg_agent_announce()`; a `FunctionCallCancelled` branch after `FunctionCallRequest` in `handle_json()`; and `concierge_tool_add_definition()` after the Echo tool in `send_settings()` | Re-apply each hook next to its neighbour. The dispatch branch has to come before the clock and voice handlers. |
+| `main/audio_io.c` | Uplink VAD gate: a block whose post-AEC peak is louder than the raw mic can't open the gate | Proposed upstream as [esp32-deepgram-voice-agent#14](https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/pull/14), byte-identical. Once it merges, take upstream's version. |
 | `main/wifi_prov.c` | `BODY_MAX` 3072, the `cg_fields_t` parser, the parse/save block after `form_get(... "tz" ...)`, and the `cg_err` check | Keep the concierge block before the body is wiped. |
 | `main/portal.src.html` | Concierge fields, extra form fields in the POST, and error text shown when the response isn't OK | Re-add the fields and the `cg_*` keys. |
 | `.github/workflows/release.yml` | Tag trigger is `companion-v*` | Keep `companion-v*`. |

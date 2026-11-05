@@ -14,5 +14,24 @@ CONFIG_CONCIERGE_TURN_TIMEOUT_MS=25000
 CONFIG_AGENT_NAME="Zee"
 CONFIG_DEEPGRAM_AGENT_GREETING="Hi, I'm Zee, your concierge. What can I do for you?"
 
+# Keep the speaker amplifier on through desk waits. Upstream switches it off
+# after 5 s of silence, and a desk turn is often longer than that. On the bench,
+# 5 of 10 amplifier wake-ups were followed within 1.5 s by echo-cancellation
+# blocks louder than the raw mic, and both self-interruptions were among them.
+# Waking the amplifier changes the echo path faster than the canceller can
+# follow. 60 s outlasts a conversation's pauses and still saves power between
+# sessions.
+CONFIG_AUDIO_PA_IDLE_OFF_MS=60000
+
 # Warmer than the Deepgram fuchsia, for a hotel room.
 CONFIG_UI_DEFAULT_ORB_COLOR_BRASS=y
+
+# Dev tunnels (*.devtunnels.ms) chain to "Microsoft TLS RSA Root G2", which is
+# not in IDF 5.5.5's Mozilla bundle. The tunnel also sends a DigiCert cross-sign,
+# but before the intermediate it signs, and mbedTLS only looks for issuers later
+# in the chain, so the handshake fails with -0x3000. Adding the root to the
+# bundle fixes it. The root came from
+# https://www.microsoft.com/pkiops/certs/ ; SHA-256 6A:17:05:83:DB:58:41:51:E1:C4:
+# 54:EE:CA:2A:64:CC:5D:8E:48:4A:5B:D1:15:6E:72:0B:44:58:65:4E:E9:E5.
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH="components/concierge/certs/microsoft_tls_rsa_root_g2.pem"

@@ -1910,6 +1910,9 @@ static void handle_function_call(const cJSON *root)
 
 #if CONFIG_CONCIERGE_ENABLE
         if (concierge_tool_is(name->valuestring)) { /* concierge-companion */
+            if (s_ready) {
+                dg_agent_announce(CONCIERGE_HOLDING_LINE);
+            }
             const cJSON *a = cJSON_GetObjectItemCaseSensitive(fn, "arguments");
             concierge_tool_handle_async(s_request_id, id->valuestring, name->valuestring,
                                         cJSON_IsString(a) ? a->valuestring : NULL,
@@ -3221,6 +3224,20 @@ static void handle_json(const char *json, int len)
 
     } else if (strcmp(t, "FunctionCallRequest") == 0) {
         handle_function_call(root);
+
+#if CONFIG_CONCIERGE_ENABLE
+    } else if (strcmp(t, "FunctionCallCancelled") == 0) {
+        /* concierge-companion: barge-in cancels a pending call; its late answer
+         * must not be sent, and a queued one must not run. */
+        const cJSON *fns = cJSON_GetObjectItemCaseSensitive(root, "functions");
+        const cJSON *fn;
+        cJSON_ArrayForEach(fn, fns) {
+            const cJSON *cid = cJSON_GetObjectItemCaseSensitive(fn, "id");
+            if (cJSON_IsString(cid)) {
+                concierge_tool_cancel(cid->valuestring);
+            }
+        }
+#endif
 
     } else if (strcmp(t, "InjectionRefused") == 0) {
         /*

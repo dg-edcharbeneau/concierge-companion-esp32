@@ -10,12 +10,14 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 
 #include "concierge_internal.h"
@@ -40,75 +42,178 @@ static void http_result_free(http_result_t *r)
     r->body = NULL;
 }
 
-static void post_json(const char *url, const char *bearer, const char *json, http_result_t *out)
+/*
+ * ONE CONNECTION, KEPT OPEN BETWEEN TURNS. A fresh TLS handshake per question
+ * cost the device ~1-1.6 s over the same request from a laptop (bench,
+ * 2026-11-04: 3.3-4.8 s on the device against 2.5-3.2 s from the Mac). Only the
+ * concierge worker uses this, one turn at a time (s_run_lock), so it needs no
+ * lock of its own.
+ */
+static esp_http_client_handle_t s_http;
+static char s_http_origin[CONCIERGE_URL_LEN];
+static int64_t s_http_last_us;
+/* Close rather than reuse a connection idle this long: a front end that has
+ * already dropped it turns the next turn into a failed write plus a retry. */
+#define IDLE_CLOSE_US (45LL * 1000 * 1000)
+
+typedef struct {
+    char *buf;
+    int len;
+    char server[48]; /* Server response header: tells the tunnel from Kestrel */
+} body_sink_t;
+
+static esp_err_t on_http_event(esp_http_client_event_t *evt)
+{
+    body_sink_t *sink = evt->user_data;
+    if (evt->event_id == HTTP_EVENT_ON_HEADER && sink != NULL &&
+        evt->header_key != NULL && strcasecmp(evt->header_key, "Server") == 0) {
+        strlcpy(sink->server, evt->header_value ? evt->header_value : "", sizeof(sink->server));
+    }
+    if (evt->event_id == HTTP_EVENT_ON_DATA && sink != NULL && sink->buf != NULL) {
+        int room = RESPONSE_MAX - sink->len;
+        int n = evt->data_len < room ? evt->data_len : room;
+        if (n > 0) {
+            memcpy(sink->buf + sink->len, evt->data, n);
+            sink->len += n;
+        }
+    }
+    return ESP_OK;
+}
+
+static void http_drop(void)
+{
+    if (s_http != NULL) {
+        esp_http_client_cleanup(s_http);
+        s_http = NULL;
+    }
+    s_http_origin[0] = '\0';
+}
+
+static esp_http_client_handle_t http_get(const char *origin, const char *url)
+{
+    const int64_t now = esp_timer_get_time();
+    if (s_http != NULL &&
+        (strcmp(origin, s_http_origin) != 0 || now - s_http_last_us > IDLE_CLOSE_US)) {
+        http_drop();
+    }
+    if (s_http == NULL) {
+        esp_http_client_config_t cfg = {
+            .url = url,
+            .method = HTTP_METHOD_POST,
+            .timeout_ms = CONFIG_CONCIERGE_TURN_TIMEOUT_MS,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .buffer_size = 2048,
+            .buffer_size_tx = 1024,
+            .keep_alive_enable = true,
+            .event_handler = on_http_event,
+        };
+        s_http = esp_http_client_init(&cfg);
+        if (s_http == NULL) {
+            return NULL;
+        }
+        strlcpy(s_http_origin, origin, sizeof(s_http_origin));
+        esp_http_client_set_header(s_http, "Accept", "application/json");
+        /* Dev tunnels interpose a warning page for browser-like clients on
+         * anonymous tunnels; this opts out explicitly. */
+        esp_http_client_set_header(s_http, "X-Tunnel-Skip-AntiPhishing-Page", "true");
+    } else {
+        esp_http_client_set_url(s_http, url);
+        esp_http_client_set_method(s_http, HTTP_METHOD_POST);
+    }
+    return s_http;
+}
+
+static esp_err_t post_once(const char *origin, const char *url, const char *auth,
+                           const char *json, body_sink_t *sink, int *status)
+{
+    esp_http_client_handle_t c = http_get(origin, url);
+    if (c == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (auth != NULL) {
+        esp_http_client_set_header(c, "Authorization", auth);
+    } else {
+        esp_http_client_delete_header(c, "Authorization");
+    }
+    esp_http_client_set_user_data(c, sink);
+    /*
+     * EVERY REQUEST, NOT ONCE AT INIT. esp_http_client_set_post_field(NULL) below
+     * also deletes Content-Type, and with none set the next post field defaults
+     * it to application/x-www-form-urlencoded. ASP.NET then treats the request as
+     * a form post and refuses it for want of an antiforgery token: every request
+     * after the first on a kept connection failed that way on the bench.
+     */
+    esp_http_client_set_header(c, "Content-Type", "application/json");
+    esp_http_client_set_post_field(c, json, (int)strlen(json));
+    sink->len = 0;
+    sink->server[0] = '\0';
+    esp_err_t err = esp_http_client_perform(c);
+    /* The post field points at the caller's buffer; never leave it dangling. */
+    esp_http_client_set_post_field(c, NULL, 0);
+    if (err == ESP_OK) {
+        *status = esp_http_client_get_status_code(c);
+        s_http_last_us = esp_timer_get_time();
+    } else {
+        http_drop();
+    }
+    return err;
+}
+
+static void post_json(const char *origin, const char *url, const char *bearer,
+                      const char *json, http_result_t *out)
 {
     out->status = -1;
     out->body = NULL;
-
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = CONFIG_CONCIERGE_TURN_TIMEOUT_MS,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .buffer_size = 2048,
-        .buffer_size_tx = 1024,
-        .keep_alive_enable = false,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (client == NULL) {
-        return;
-    }
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_header(client, "Accept", "application/json");
-    /* Dev tunnels interpose a warning page for browser-like clients on anonymous
-     * tunnels; this opts out explicitly instead of relying on the User-Agent. */
-    esp_http_client_set_header(client, "X-Tunnel-Skip-AntiPhishing-Page", "true");
 
     char *auth = NULL;
     if (bearer != NULL) {
         size_t n = strlen("Bearer ") + strlen(bearer) + 1;
         auth = malloc(n);
         if (auth == NULL) {
-            esp_http_client_cleanup(client);
             return;
         }
         snprintf(auth, n, "Bearer %s", bearer);
-        esp_http_client_set_header(client, "Authorization", auth);
     }
+    body_sink_t sink = { .buf = heap_caps_malloc(RESPONSE_MAX + 1, MALLOC_CAP_SPIRAM) };
 
-    const int len = (int)strlen(json);
-    esp_err_t err = esp_http_client_open(client, len);
-    if (err == ESP_OK && esp_http_client_write(client, json, len) != len) {
-        err = ESP_FAIL;
-    }
-    if (err == ESP_OK && esp_http_client_fetch_headers(client) < 0) {
-        err = ESP_FAIL;
+    const bool reused = (s_http != NULL);
+    int status = -1;
+    const int64_t t0 = esp_timer_get_time();
+    esp_err_t err = post_once(origin, url, auth, json, &sink, &status);
+    /* Only a FAST failure on a kept connection is a stale socket; a slow one is
+     * the desk timing out, and resending would just wait the timeout again. */
+    if (err != ESP_OK && reused && esp_timer_get_time() - t0 < 3LL * 1000 * 1000) {
+        /* Safe to resend: a turn with the same turnId joins the one already
+         * admitted, and an extra verify only mints a spare session. */
+        ESP_LOGI(TAG, "kept connection failed (%s); retrying on a new one", esp_err_to_name(err));
+        err = post_once(origin, url, auth, json, &sink, &status);
+    } else if (reused && status == 400 &&
+               (sink.buf == NULL || memmem(sink.buf, sink.len, "\"code\"", 6) == NULL)) {
+        /*
+         * A 400 the concierge API did not write (its errors always carry a
+         * code) on a kept connection: seen on the bench 2026-11-04 for every
+         * request after the second on one socket, while the same body on a fresh
+         * connection succeeds. Log what answered, then resend on a new socket;
+         * the turnId makes that safe.
+         */
+        if (sink.buf != NULL) {
+            sink.buf[sink.len < 160 ? sink.len : 160] = '\0';
+        }
+        ESP_LOGW(TAG, "kept connection got a non-API 400 (server \"%s\", body \"%s\"); retrying on a new one",
+                 sink.server, sink.buf ? sink.buf : "");
+        http_drop();
+        err = post_once(origin, url, auth, json, &sink, &status);
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "POST %s failed: %s", url, esp_err_to_name(err));
-        goto done;
-    }
-
-    out->status = esp_http_client_get_status_code(client);
-    char *body = heap_caps_malloc(RESPONSE_MAX + 1, MALLOC_CAP_SPIRAM);
-    if (body != NULL) {
-        int got = 0;
-        /* Read until EOF rather than trusting Content-Length: a tunnel may
-         * re-frame the response as chunked. */
-        while (got < RESPONSE_MAX) {
-            int r = esp_http_client_read(client, body + got, RESPONSE_MAX - got);
-            if (r <= 0) {
-                break;
-            }
-            got += r;
+        free(sink.buf);
+    } else {
+        out->status = status;
+        if (sink.buf != NULL) {
+            sink.buf[sink.len] = '\0';
+            out->body = sink.buf;
         }
-        body[got] = '\0';
-        out->body = body;
     }
-
-done:
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
     if (auth != NULL) {
         memset(auth, 0, strlen(auth));
         free(auth);
@@ -146,7 +251,7 @@ static concierge_status_t verify(const concierge_guest_t *g, char *credential, s
     }
 
     http_result_t r;
-    post_json(url, NULL, json, &r);
+    post_json(g->base_url, url, NULL, json, &r);
     cJSON_free(json);
 
     concierge_status_t st;
@@ -192,7 +297,7 @@ static concierge_status_t submit(const concierge_guest_t *g, const char *credent
     }
 
     http_result_t r;
-    post_json(url, credential, json, &r);
+    post_json(g->base_url, url, credential, json, &r);
     cJSON_free(json);
 
     concierge_status_t st;

@@ -65,6 +65,19 @@ The device and the browser UI can be signed in to the same stay at the same
 time. They share one stay workflow, so the browser shows a ride booked from
 the device.
 
+## TLS to dev tunnels
+
+`*.devtunnels.ms` chains to **Microsoft TLS RSA Root G2**, which isn't in IDF 5.5.5's CA bundle. The
+tunnel does send a DigiCert cross-signed copy of that root. But it sends it before the intermediate it
+signs, and mbedTLS only looks for an issuer later in the chain. The handshake then fails with
+`esp-x509-crt-bundle: Failed to verify certificate` / `-0x3000`. Curl and browsers rebuild the chain in
+any order, which is why the URL works from a laptop.
+
+The fix is to add the root to the bundle through `CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE`. The
+certificate came from Microsoft's PKI repository (SHA-256 `6A:17:05:83…E9:E5`, valid until 2040), and its
+key matches the cross-signed copy the tunnel presents. If the tunnel ever changes CA, the same error
+comes back. Compare `openssl s_client -showcerts` against the bundle.
+
 ## Errors the device speaks
 
 When `ask_concierge` fails, the function result starts with `DESK ERROR:`. The
@@ -82,7 +95,39 @@ for word.
 
 Serial logs use the `concierge` tag. The credential is never logged.
 
+## Latency (bench, 2026-11-04)
+
+Measured from the end of the guest's speech to the device speaking the answer: **3.5–6 s**.
+
+| Stage | System | Time |
+|---|---|---|
+| Decide to call `ask_concierge` | Device think LLM (`gpt-5.4-mini`) | 0.5–0.7 s |
+| Network | Dev tunnel + TLS (connection reused) | 0.45–1.45 s; about 1 s more on a new handshake |
+| Retrieval embedding | Foundry `text-embedding-3-small` | 0.13–0.26 s |
+| Answer model | Foundry `gpt-5-mini` | 1.4–2.7 s; about 1 s on `gpt-5.4-mini` |
+| Tool (weather, places, ride) | Concierge activity | 0.15–0.6 s |
+| Speak the answer | Device think LLM, second step | 0.6–1.1 s |
+
+The holding line plays about 0.9 s after the guest stops speaking, which covers most of that wait.
+
+## Echo and self-interruption
+
+Two things made the device hear its own voice as a barge-in, and both are fixed:
+
+- **A misadapted echo-cancellation block:** one where the cancelled output is louder than the raw
+  microphone, which can't happen with real speech. Such a block can no longer open the uplink gate. The
+  log shows `EVT aec block louder than mic` when the guard fires.
+- **Amplifier wake-ups:** upstream switches the amplifier off after 5 s of silence, and a desk wait is
+  longer than that. Each wake-up changes the echo path, and on the bench half of them were followed by
+  misadapted blocks. `AUDIO_PA_IDLE_OFF_MS=60000` keeps the amplifier on through a conversation.
+
+Both changes are proposed upstream in esp32-deepgram-voice-agent#14.
+
 ## Limits and known gaps
+
+- **Holding line in the model's context.** The firmware queues "One moment, let me check with the
+  desk." as an agent message, so it ends up in the device model's conversation context. On the bench,
+  the model once said that line by itself and never called `ask_concierge`.
 
 - **Latency.** A concierge answer needs two model hops: the device's think
   model, then the concierge workflow's model. Expect the desk's own latency
@@ -90,8 +135,9 @@ Serial logs use the `concierge` tag. The credential is never logged.
 - **Rewording.** The device model rewords the desk's answers. The prompt
   requires every fact, time and place to be kept; check this live,
   especially for ride confirmations.
-- **One question at a time.** A second `ask_concierge` while one is still
-  running gets a "still answering" error.
+- **Questions run one at a time.** One `ask_concierge` call runs and one waits behind it. A third
+  gets a "still answering" error. A call cancelled by barge-in (`FunctionCallCancelled`) has its
+  answer dropped.
 - **Turn timeout.** `CONFIG_CONCIERGE_TURN_TIMEOUT_MS` defaults to 25 s.
   Deepgram's own timeout for a client-side function result hasn't been
   measured yet (see the smoke test).

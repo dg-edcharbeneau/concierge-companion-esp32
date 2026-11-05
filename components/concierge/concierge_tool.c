@@ -11,8 +11,11 @@
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
 #include "concierge_internal.h"
 
@@ -42,7 +45,18 @@ static const char DEFINITION[] =
     "\"properties\":{\"request\":{\"type\":\"string\",\"description\":\"The guest's "
     "words, close to verbatim\"}},\"required\":[\"request\"]}}";
 
+/*
+ * TWO SLOTS: one call in flight and one waiting behind it. A barge-in cancels
+ * the pending call and the guest usually re-asks at once, so refusing a second
+ * call outright turned every interruption into "the desk is busy" (seen on the
+ * bench). Turns run one at a time -- the stay workflow orders them anyway, and a
+ * second TLS session would double the internal-RAM cost.
+ */
+#define MAX_JOBS 2
+
 typedef struct {
+    bool in_use;
+    bool cancelled;
     char session_tag[64];
     char id[96];
     char name[32];
@@ -51,7 +65,50 @@ typedef struct {
     concierge_reply_fn reply;
 } job_t;
 
-static volatile bool s_busy;
+static job_t s_jobs[MAX_JOBS];
+static portMUX_TYPE s_jobs_lock = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t s_run_lock;
+
+#ifndef CONFIG_CONCIERGE_TURN_TIMEOUT_MS
+#define CONFIG_CONCIERGE_TURN_TIMEOUT_MS 25000
+#endif
+/* A queued call waits out at most one full turn ahead of it, plus TLS setup. */
+#define QUEUE_WAIT_MS (CONFIG_CONCIERGE_TURN_TIMEOUT_MS + 10000)
+
+static bool job_cancelled(job_t *job)
+{
+    taskENTER_CRITICAL(&s_jobs_lock);
+    bool c = job->cancelled;
+    taskEXIT_CRITICAL(&s_jobs_lock);
+    return c;
+}
+
+static void job_release(job_t *job)
+{
+    free(job->request);
+    taskENTER_CRITICAL(&s_jobs_lock);
+    memset(job, 0, sizeof(*job));
+    taskEXIT_CRITICAL(&s_jobs_lock);
+}
+
+void concierge_tool_cancel(const char *id)
+{
+    if (id == NULL) {
+        return;
+    }
+    bool hit = false;
+    taskENTER_CRITICAL(&s_jobs_lock);
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (s_jobs[i].in_use && strcmp(s_jobs[i].id, id) == 0) {
+            s_jobs[i].cancelled = true;
+            hit = true;
+        }
+    }
+    taskEXIT_CRITICAL(&s_jobs_lock);
+    if (hit) {
+        ESP_LOGI(TAG, "call %s cancelled by the agent", id);
+    }
+}
 
 void concierge_tool_add_definition(cJSON *functions)
 {
@@ -113,19 +170,45 @@ static void clamp_utf8(char *s, size_t max_bytes)
 static void worker(void *arg)
 {
     job_t *job = arg;
-    char *answer = NULL;
-    concierge_status_t st = concierge_client_ask(job->turn_id, job->request, &answer);
-    if (st == CONCIERGE_OK) {
-        ESP_LOGI(TAG, "turn %s answered (%u bytes)", job->turn_id, (unsigned)strlen(answer));
-        job->reply(job->session_tag, job->id, job->name, answer);
-    } else {
-        ESP_LOGW(TAG, "turn %s failed: status %d", job->turn_id, (int)st);
-        job->reply(job->session_tag, job->id, job->name, spoken_error(st));
+    const int64_t queued_us = esp_timer_get_time();
+
+    if (xSemaphoreTake(s_run_lock, pdMS_TO_TICKS(QUEUE_WAIT_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "turn %s gave up waiting for the previous one", job->turn_id);
+        if (!job_cancelled(job)) {
+            job->reply(job->session_tag, job->id, job->name, spoken_error(CONCIERGE_UNAVAILABLE));
+        }
+        job_release(job);
+        vTaskDelete(NULL);
+        return;
     }
-    free(answer);
-    free(job->request);
-    free(job);
-    s_busy = false;
+
+    if (job_cancelled(job)) {
+        /* Cancelled while queued: the guest has moved on, so no desk turn at all. */
+        ESP_LOGI(TAG, "turn %s skipped: cancelled before it ran", job->turn_id);
+    } else {
+        const int64_t start_us = esp_timer_get_time();
+        char *answer = NULL;
+        concierge_status_t st = concierge_client_ask(job->turn_id, job->request, &answer);
+        const int ms = (int)((esp_timer_get_time() - start_us) / 1000);
+        const int waited = (int)((start_us - queued_us) / 1000);
+        const bool cancelled = job_cancelled(job);
+        if (st == CONCIERGE_OK) {
+            ESP_LOGI(TAG, "turn %s answered in %d ms (queued %d ms, %u bytes)%s", job->turn_id, ms,
+                     waited, (unsigned)strlen(answer), cancelled ? " -- cancelled, not sent" : "");
+            if (!cancelled) {
+                job->reply(job->session_tag, job->id, job->name, answer);
+            }
+        } else {
+            ESP_LOGW(TAG, "turn %s failed in %d ms: status %d%s", job->turn_id, ms, (int)st,
+                     cancelled ? " -- cancelled, not sent" : "");
+            if (!cancelled) {
+                job->reply(job->session_tag, job->id, job->name, spoken_error(st));
+            }
+        }
+        free(answer);
+    }
+    xSemaphoreGive(s_run_lock);
+    job_release(job);
     vTaskDelete(NULL);
 }
 
@@ -141,22 +224,34 @@ void concierge_tool_handle_async(const char *session_tag, const char *id, const 
         return;
     }
 
-    /* One at a time: the stay workflow orders turns anyway, and a second TLS
-     * session would double the internal-RAM cost for no gain. */
-    if (s_busy) {
+    if (s_run_lock == NULL) {
+        /* First call ever; FunctionCallRequests arrive on one task, so no race. */
+        s_run_lock = xSemaphoreCreateMutex();
+    }
+
+    job_t *job = NULL;
+    taskENTER_CRITICAL(&s_jobs_lock);
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (!s_jobs[i].in_use) {
+            job = &s_jobs[i];
+            job->in_use = true;
+            break;
+        }
+    }
+    taskEXIT_CRITICAL(&s_jobs_lock);
+    if (job == NULL) {
         cJSON_Delete(args);
         reply(session_tag, id, name,
-              "DESK ERROR: the desk is still answering the previous question. "
-              "Wait for that answer, then ask again.");
+              "DESK ERROR: the desk is still answering earlier questions. Wait for "
+              "those answers, then ask again.");
         return;
     }
 
-    job_t *job = calloc(1, sizeof(*job));
-    char *text = job ? strdup(req->valuestring) : NULL;
+    char *text = strdup(req->valuestring);
     cJSON_Delete(args);
-    if (job == NULL || text == NULL) {
-        free(job);
+    if (text == NULL || s_run_lock == NULL) {
         free(text);
+        job_release(job);
         reply(session_tag, id, name, spoken_error(CONCIERGE_UNAVAILABLE));
         return;
     }
@@ -171,12 +266,9 @@ void concierge_tool_handle_async(const char *session_tag, const char *id, const 
     job->request = text;
     job->reply = reply;
 
-    s_busy = true;
     if (xTaskCreatePinnedToCore(worker, "concierge", TASK_STACK, job, TASK_PRIO, NULL, 0) != pdPASS) {
-        s_busy = false;
         ESP_LOGE(TAG, "no internal RAM for the concierge task");
         reply(session_tag, id, name, spoken_error(CONCIERGE_UNAVAILABLE));
-        free(job->request);
-        free(job);
+        job_release(job);
     }
 }
