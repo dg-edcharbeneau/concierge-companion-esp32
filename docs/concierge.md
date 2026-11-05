@@ -45,17 +45,42 @@ precedence. Never commit them in `sdkconfig.defaults.concierge`.
 1. The device's model decides the request is for the desk. It says a short
    holding line and calls `ask_concierge` with the guest's words.
 2. `dg_agent.c` passes the call to `concierge_tool_handle_async()` and goes
-   straight back to the WebSocket. A worker task makes the HTTPS call. It
-   lives only for the call, on a 6 kB internal-RAM stack.
-3. On the first question after boot, or after any settings change, the worker
-   verifies the guest (`POST /sessions`) and caches the credential in NVS.
+   straight back to the WebSocket. One persistent worker task makes the HTTPS
+   call. Its stack and control block are in PSRAM, so a desk call costs no
+   internal RAM. Because of that, the worker never touches flash: the guest
+   settings are read from NVS once at boot.
+3. On the first question after boot, the worker verifies the guest
+   (`POST /sessions`) and keeps the credential in RAM only.
 4. `POST /turns` sends `turnId: "dev:<128-bit random>"` and `channel: "voice"`.
    On a `401` (the stay ended, was reset or was ended), the worker verifies
    again and retries once with the same `turnId`. The stay workflow joins
    exact retries, so a ride isn't booked twice.
-5. The answer goes back as the `FunctionCallResponse`. If the agent connection
-   was replaced in the meantime, the answer is dropped, because an old
-   function ID sent on a new connection would come back as a server `Error`.
+5. The answer is built as `FunctionCallResponse` JSON in PSRAM, queued, and
+   sent by `keepalive_task`, the firmware's single TEXT sender. On weak Wi-Fi,
+   sending it from the worker made a second sender contend for the client lock
+   and once dropped the session. If the agent connection was replaced in the
+   meantime, the answer is dropped, because an old function ID sent on a new
+   connection would come back as a server `Error`.
+
+## Hold lines and recovery
+
+The device fills a desk wait only when it needs to (`concierge_hold.c`):
+
+- **Hold line.** If the call is still pending after `CONCIERGE_HOLD_DELAY_MS`
+  (2.5 s), the device says one short line from a pool of 8, never one of the
+  last 3 used. It says nothing if the answer arrives first, if the model
+  already said something itself, or if the guest is talking. On the bench with
+  `gpt-5.4-mini`, 4 of 7 desk calls got a line and 3 didn't.
+- **Still waiting.** If the call is still pending at `CONCIERGE_HOLD_LONG_MS`
+  (8 s), the device says one line from a second pool.
+- **Device lines are kept out of the replayed history**, so the model doesn't
+  see itself opening every answer the same way.
+- **Recovery.** If the model says it will check ("let me check", "one
+  moment", ...) but makes no function call within `CONCIERGE_RECOVERY_MS`
+  (1.2 s) of finishing, the device sends `InjectUserMessage`: "Please ask the
+  desk: <the guest's last words>". That happens at most once per guest turn.
+- **Memory.** One mutex, one `esp_timer` created once, phrases in rodata, and
+  a 256 B buffer in PSRAM. Logic tests: `host/concierge_hold.sh`.
 
 Rides are always proposed and confirmed by the desk. The prompt tells the
 device model to pass the guest's yes, no or change back through
@@ -125,9 +150,8 @@ Both changes are proposed upstream in esp32-deepgram-voice-agent#14.
 
 ## Limits and known gaps
 
-- **Holding line in the model's context.** The firmware queues "One moment, let me check with the
-  desk." as an agent message, so it ends up in the device model's conversation context. On the bench,
-  the model once said that line by itself and never called `ask_concierge`.
+- **Recovery is heuristic.** It only fires when the model's words match the
+  promise list. It has been tested on the host, but not yet seen on the device.
 
 - **Latency.** A concierge answer needs two model hops: the device's think
   model, then the concierge workflow's model. Expect the desk's own latency

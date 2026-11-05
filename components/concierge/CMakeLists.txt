@@ -6,6 +6,7 @@ idf_component_register(
         concierge_store.c
         concierge_client.c
         concierge_tool.c
+        concierge_hold.c
     INCLUDE_DIRS include
     # Replacements for main/prompt/identity.md and boundaries.md, picked in
     # main/agent_prompt.c. The embed symbols are global, so main can name them.

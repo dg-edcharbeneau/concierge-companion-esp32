@@ -2,8 +2,9 @@
  * Concierge settings in NVS. Same precedence rule as main/api_key.c: a value
  * saved through the portal wins, and the Kconfig value is only a first-boot seed.
  *
- * The credential is a bearer for the guest's stay. Like the Deepgram key it is
- * never logged.
+ * Read once at init (concierge_tool_init) and written only by the portal. The
+ * guest's credential is no longer kept here -- see concierge_session_t -- but
+ * a save still erases the "cred" key older firmware left behind.
  */
 #include <string.h>
 
@@ -95,39 +96,4 @@ esp_err_t concierge_store_save(const char *base_url, const char *last_name, cons
         ESP_LOGI(TAG, "concierge settings saved");
     }
     return err;
-}
-
-bool concierge_store_load_credential(char *out, size_t cap)
-{
-    nvs_handle_t h;
-    out[0] = '\0';
-    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
-        return false;
-    }
-    bool ok = read_str(h, "cred", out, cap);
-    nvs_close(h);
-    return ok;
-}
-
-void concierge_store_save_credential(const char *credential)
-{
-    nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) {
-        return;
-    }
-    if (nvs_set_str(h, "cred", credential) == ESP_OK) {
-        nvs_commit(h);
-    }
-    nvs_close(h);
-}
-
-void concierge_store_clear_credential(void)
-{
-    nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) {
-        return;
-    }
-    nvs_erase_key(h, "cred");
-    nvs_commit(h);
-    nvs_close(h);
 }

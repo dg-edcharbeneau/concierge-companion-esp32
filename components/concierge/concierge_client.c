@@ -168,7 +168,7 @@ static void post_json(const char *origin, const char *url, const char *bearer,
     char *auth = NULL;
     if (bearer != NULL) {
         size_t n = strlen("Bearer ") + strlen(bearer) + 1;
-        auth = malloc(n);
+        auth = heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
         if (auth == NULL) {
             return;
         }
@@ -262,7 +262,6 @@ static concierge_status_t verify(const concierge_guest_t *g, char *credential, s
         const char *c = root ? json_string(root, "credential") : NULL;
         if (c != NULL && strlen(c) < cap) {
             strlcpy(credential, c, cap);
-            concierge_store_save_credential(c);
             ESP_LOGI(TAG, "guest verified");
             st = CONCIERGE_OK;
         } else {
@@ -307,7 +306,13 @@ static concierge_status_t submit(const concierge_guest_t *g, const char *credent
         cJSON *root = r.body ? cJSON_Parse(r.body) : NULL;
         const char *a = root ? json_string(root, "assistantMessage") : NULL;
         if (a != NULL) {
-            *answer = strdup(a);
+            /* PSRAM: a plain strdup of anything under 4 kB lands in internal RAM
+             * (SPIRAM_MALLOC_ALWAYSINTERNAL). */
+            const size_t n = strlen(a) + 1;
+            *answer = heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+            if (*answer != NULL) {
+                memcpy(*answer, a, n);
+            }
             st = (*answer != NULL) ? CONCIERGE_OK : CONCIERGE_UNAVAILABLE;
         } else {
             st = CONCIERGE_BAD_RESPONSE;
@@ -323,34 +328,35 @@ static concierge_status_t submit(const concierge_guest_t *g, const char *credent
     return st;
 }
 
-concierge_status_t concierge_client_ask(const char *turn_id, const char *text, char **answer)
+concierge_status_t concierge_client_ask(concierge_session_t *session, const char *turn_id,
+                                        const char *text, char **answer)
 {
     *answer = NULL;
-    concierge_guest_t g;
-    if (!concierge_store_load_guest(&g)) {
+    if (session == NULL || !session->configured) {
         return CONCIERGE_NOT_CONFIGURED;
     }
+    const concierge_guest_t *g = &session->guest;
+    char *credential = session->credential;
+    const size_t cap = sizeof(session->credential);
 
-    char credential[CONCIERGE_CREDENTIAL_LEN];
     bool fresh = false;
-    if (!concierge_store_load_credential(credential, sizeof(credential))) {
-        concierge_status_t v = verify(&g, credential, sizeof(credential));
+    if (credential[0] == '\0') {
+        concierge_status_t v = verify(g, credential, cap);
         if (v != CONCIERGE_OK) {
             return v;
         }
         fresh = true;
     }
 
-    concierge_status_t st = submit(&g, credential, turn_id, text, answer);
+    concierge_status_t st = submit(g, credential, turn_id, text, answer);
     if (st == CONCIERGE_UNAUTHORIZED && !fresh) {
         /* Sessions end with the stay or a reset; one re-verify covers both. */
-        concierge_store_clear_credential();
-        concierge_status_t v = verify(&g, credential, sizeof(credential));
+        memset(credential, 0, cap);
+        concierge_status_t v = verify(g, credential, cap);
         if (v != CONCIERGE_OK) {
             return v;
         }
-        st = submit(&g, credential, turn_id, text, answer);
+        st = submit(g, credential, turn_id, text, answer);
     }
-    memset(credential, 0, sizeof(credential));
     return st;
 }

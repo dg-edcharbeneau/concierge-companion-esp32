@@ -40,4 +40,33 @@ menu "Concierge Companion"
             have been measured at up to ~17 s end to end (concierge ADR 0008), so
             this leaves margin without letting a dead tunnel hang the turn.
 
+    config CONCIERGE_HOLD_DELAY_MS
+        int "Say a hold line when a desk call is still pending after (ms)"
+        depends on CONCIERGE_ENABLE
+        range 500 10000
+        default 2500
+        help
+            Measured from the FunctionCallRequest, which itself comes ~0.6 s
+            after the guest stops speaking. A desk answer faster than this gets
+            no filler at all. At 1500 every desk call on the bench qualified
+            (1.7-4.5 s on gpt-5-mini over weak Wi-Fi) and one line started
+            0.17 s before its answer, which then waited for it. Raise it if
+            lines still start just before answers.
+
+    config CONCIERGE_HOLD_LONG_MS
+        int "Say one still-waiting line when a desk call is pending after (ms)"
+        depends on CONCIERGE_ENABLE
+        range 2000 30000
+        default 8000
+
+    config CONCIERGE_RECOVERY_MS
+        int "After the agent promises to check, wait this long for a call (ms)"
+        depends on CONCIERGE_ENABLE
+        range 300 5000
+        default 1200
+        help
+            If an agent turn says it will check and no function call arrives
+            within this long after it finishes speaking, the device nudges it
+            to ask the desk with the guest's last words.
+
 endmenu

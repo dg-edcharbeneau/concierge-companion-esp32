@@ -40,7 +40,8 @@ Upstream tags (`v*`) are not pushed here. Companion releases use
 Everything companion-specific lives in files that upstream doesn't have, so
 those files can't conflict:
 
-- `components/concierge/`: the component (Kconfig, NVS settings, HTTPS client, `ask_concierge`, prompt blocks)
+- `components/concierge/`: the component (Kconfig, NVS settings, HTTPS client, `ask_concierge`, the PSRAM worker, hold lines and recovery in `concierge_hold.c`, prompt blocks)
+- `host/concierge_hold.sh`, `host/concierge_hold_test.c`: host tests for `concierge_hold.c`
 - `sdkconfig.defaults.concierge`: name, greeting, orb colour, concierge defaults, the extra TLS root for dev tunnels, and `AUDIO_PA_IDLE_OFF_MS=60000`. That last line is redundant once PR #14 merges, since it changes the upstream default.
 - `components/concierge/certs/microsoft_tls_rsa_root_g2.pem`: added to the CA bundle (see docs/concierge.md)
 - `docs/concierge.md`, `UPSTREAM.md`
@@ -54,7 +55,7 @@ These are the only places a merge can conflict:
 | `CMakeLists.txt` | `SDKCONFIG_DEFAULTS` adds `sdkconfig.defaults.concierge` | Keep both files in the list. |
 | `main/CMakeLists.txt` | `REQUIRES ... concierge` | Re-add the line. |
 | `main/agent_prompt.c` | `identity.md` and `boundaries.md` are swapped for the concierge blocks when `CONFIG_CONCIERGE_ENABLE` | Keep the macros. If upstream rewrote those two blocks, decide whether the concierge versions need the same change. |
-| `main/dg_agent.c` | Include `concierge.h`; `concierge_reply()` after `send_function_response()`; a dispatch branch at the top of `handle_function_call()`, which also queues the holding line with `dg_agent_announce()`; a `FunctionCallCancelled` branch after `FunctionCallRequest` in `handle_json()`; and `concierge_tool_add_definition()` after the Echo tool in `send_settings()` | Re-apply each hook next to its neighbour. The dispatch branch has to come before the clock and voice handlers. |
+| `main/dg_agent.c` | Include `concierge.h`; the answer queue (`concierge_reply()`, `concierge_send_pending_answer()`) after `send_function_response()`; `keepalive_task` sends a queued answer first (`answered` gates the other branches); `concierge_on_function_call()` and the `ask_concierge` dispatch at the top of `handle_function_call()`; `concierge_on_text()` plus the `device_line` history skip in `ConversationText`; `concierge_on_user_speaking()` / `concierge_on_agent_done()`; a `FunctionCallCancelled` branch; `concierge_tool_add_definition()` in `send_settings()`; `concierge_tool_init()` at the end of `dg_agent_init()` | Re-apply each hook next to its neighbour. The dispatch has to come before the clock and voice handlers. If upstream reworks `keepalive_task`, keep answers on that task: it's the one TEXT sender `dg_agent_stop()` quiesces. |
 | `main/audio_io.c` | Uplink VAD gate: a block whose post-AEC peak is louder than the raw mic can't open the gate | Proposed upstream as [esp32-deepgram-voice-agent#14](https://github.com/dg-edcharbeneau/esp32-deepgram-voice-agent/pull/14), byte-identical. Once it merges, take upstream's version. |
 | `main/wifi_prov.c` | `BODY_MAX` 3072, the `cg_fields_t` parser, the parse/save block after `form_get(... "tz" ...)`, and the `cg_err` check | Keep the concierge block before the body is wiped. |
 | `main/portal.src.html` | Concierge fields, extra form fields in the POST, and error text shown when the response isn't OK | Re-add the fields and the `cg_*` keys. |

@@ -1377,12 +1377,68 @@ static void send_function_response(const char *id, const char *name, const char 
 
 #if CONFIG_CONCIERGE_ENABLE
 /*
- * concierge-companion: ask_concierge answers arrive from the concierge task,
- * seconds later and possibly after this connection was replaced. A function id
- * from an old session sent into a new one comes back as a server Error, so an
- * answer is only delivered to the connection that asked (same Welcome
- * request_id). Sending from another task is safe: the client lock is shared.
+ * concierge-companion: ask_concierge answers, SENT BY keepalive_task.
+ *
+ * They are produced on the concierge worker, seconds after the call. Sending
+ * them from there made it a second TEXT sender contending for the client lock
+ * with keepalive_task's injects, and on weak Wi-Fi (bench 2026-11-04, -68 to
+ * -83 dBm) one lost: "Could not lock ws-client within 2000 timeout", then a
+ * transport error and a dropped session. keepalive_task is the one TEXT sender
+ * dg_agent_stop() already quiesces (s_sending_ka), so answers go through it.
+ *
+ * The JSON is built HERE, on the caller's stack, by hand into PSRAM (cJSON's
+ * nodes and anything under 4 kB from malloc would land in internal RAM), so
+ * keepalive_task's 3 kB stack only sends it. The queue is PSRAM too.
+ *
+ * A function id from an old session sent into a new one comes back as a server
+ * Error, so the Welcome request_id travels with the answer and is checked again
+ * at send time.
  */
+typedef struct {
+    char tag[sizeof(s_request_id)];
+    size_t len;
+    char json[];
+} concierge_fcr_t;
+
+#define CONCIERGE_FCR_DEPTH 4
+static QueueHandle_t s_concierge_fcr_q;
+
+/* JSON-escapes `in` into out[*n...]; false when it does not fit. */
+static bool fcr_put_escaped(char *out, size_t cap, size_t *n, const char *in)
+{
+    static const char HEX[] = "0123456789abcdef";
+    for (const unsigned char *p = (const unsigned char *)in; *p; p++) {
+        if (*n + 7 >= cap) {
+            return false;
+        }
+        if (*p == '"' || *p == '\\') {
+            out[(*n)++] = '\\';
+            out[(*n)++] = (char)*p;
+        } else if (*p < 0x20) {
+            out[(*n)++] = '\\';
+            out[(*n)++] = 'u';
+            out[(*n)++] = '0';
+            out[(*n)++] = '0';
+            out[(*n)++] = HEX[*p >> 4];
+            out[(*n)++] = HEX[*p & 0xF];
+        } else {
+            out[(*n)++] = (char)*p;
+        }
+    }
+    return true;
+}
+
+static bool fcr_put(char *out, size_t cap, size_t *n, const char *lit)
+{
+    const size_t l = strlen(lit);
+    if (*n + l >= cap) {
+        return false;
+    }
+    memcpy(out + *n, lit, l);
+    *n += l;
+    return true;
+}
+
 static void concierge_reply(const char *session_tag, const char *id, const char *name,
                             const char *content)
 {
@@ -1390,7 +1446,63 @@ static void concierge_reply(const char *session_tag, const char *id, const char 
         ESP_LOGW(TAG, "concierge answer for a closed session dropped");
         return;
     }
-    send_function_response(id, name, content);
+    if (s_concierge_fcr_q == NULL) {
+        s_concierge_fcr_q = xQueueCreateWithCaps(CONCIERGE_FCR_DEPTH, sizeof(concierge_fcr_t *),
+                                                 MALLOC_CAP_SPIRAM);
+    }
+    /* Escaping at most sextuples a control byte; the rest is the fixed frame. */
+    const size_t cap = 6 * (strlen(id) + strlen(name) + strlen(content)) + 96;
+    concierge_fcr_t *m = heap_caps_malloc(sizeof(*m) + cap, MALLOC_CAP_SPIRAM);
+    if (m == NULL || s_concierge_fcr_q == NULL) {
+        ESP_LOGE(TAG, "no PSRAM for a concierge answer; dropped");
+        free(m);
+        return;
+    }
+    size_t n = 0;
+    const bool ok = fcr_put(m->json, cap, &n, "{\"type\":\"FunctionCallResponse\",\"id\":\"") &&
+                    fcr_put_escaped(m->json, cap, &n, id) &&
+                    fcr_put(m->json, cap, &n, "\",\"name\":\"") &&
+                    fcr_put_escaped(m->json, cap, &n, name) &&
+                    fcr_put(m->json, cap, &n, "\",\"content\":\"") &&
+                    fcr_put_escaped(m->json, cap, &n, content) &&
+                    fcr_put(m->json, cap, &n, "\"}");
+    if (!ok) {
+        ESP_LOGE(TAG, "concierge answer did not fit its buffer; dropped");
+        free(m);
+        return;
+    }
+    m->json[n] = '\0';
+    m->len = n;
+    strlcpy(m->tag, session_tag, sizeof(m->tag));
+    if (xQueueSend(s_concierge_fcr_q, &m, 0) != pdTRUE) {
+        ESP_LOGE(TAG, "concierge answer queue full; dropped");
+        free(m);
+        return;
+    }
+    ESP_LOGI(TAG, "concierge answer queued (%u bytes)", (unsigned)n);
+    if (s_keepalive_task != NULL) {
+        xTaskNotifyGive(s_keepalive_task);
+    }
+}
+
+/* keepalive_task only. True when an answer went out (or was dropped as stale). */
+static bool concierge_send_pending_answer(void)
+{
+    concierge_fcr_t *m = NULL;
+    if (s_concierge_fcr_q == NULL || xQueueReceive(s_concierge_fcr_q, &m, 0) != pdTRUE) {
+        return false;
+    }
+    if (s_ready && esp_websocket_client_is_connected(s_client) &&
+        strcmp(m->tag, s_request_id) == 0) {
+        esp_websocket_client_send_text(s_client, m->json, (int)m->len, SEND_TIMEOUT);
+    }
+    free(m);
+    return true;
+}
+
+static bool concierge_answer_pending(void)
+{
+    return s_concierge_fcr_q != NULL && uxQueueMessagesWaiting(s_concierge_fcr_q) > 0;
 }
 #endif
 
@@ -1905,14 +2017,14 @@ static void handle_function_call(const cJSON *root)
         if (cJSON_IsBool(client_side) && !cJSON_IsTrue(client_side)) {
             continue;
         }
+#if CONFIG_CONCIERGE_ENABLE
+        concierge_on_function_call(name->valuestring); /* concierge-companion */
+#endif
 
         char content[128];
 
 #if CONFIG_CONCIERGE_ENABLE
         if (concierge_tool_is(name->valuestring)) { /* concierge-companion */
-            if (s_ready) {
-                dg_agent_announce(CONCIERGE_HOLDING_LINE);
-            }
             const cJSON *a = cJSON_GetObjectItemCaseSensitive(fn, "arguments");
             concierge_tool_handle_async(s_request_id, id->valuestring, name->valuestring,
                                         cJSON_IsString(a) ? a->valuestring : NULL,
@@ -3135,6 +3247,12 @@ static void handle_json(const char *json, int len)
         const cJSON *content = cJSON_GetObjectItemCaseSensitive(root, "content");
         if (cJSON_IsString(role) && cJSON_IsString(content)) {
             ESP_LOGI(TAG, "%s: %s", role->valuestring, content->valuestring);
+#if CONFIG_CONCIERGE_ENABLE
+            /* concierge-companion: a hold line the device injected is not replayed. */
+            const bool device_line = concierge_on_text(role->valuestring, content->valuestring);
+#else
+            const bool device_line = false;
+#endif
             /*
              * Counted HERE and not inside history_add(), which returns early
              * when there is no arena and while the history is frozen. This
@@ -3144,7 +3262,7 @@ static void handle_json(const char *json, int len)
              * confirmation unanswerable -- the device would ask forever. It is a
              * fact about the conversation, not about the arena.
              */
-            if (s_history_hold || nudge_tail()) {
+            if (s_history_hold || nudge_tail() || device_line) {
                 /* Echo's callouts: said, shown, and forgotten. See s_history_hold
                  * and s_nudge_inflight. */
             } else {
@@ -3168,6 +3286,9 @@ static void handle_json(const char *json, int len)
 
     } else if (strcmp(t, "UserStartedSpeaking") == 0) {
         ESP_LOGI(TAG, "user started speaking");
+#if CONFIG_CONCIERGE_ENABLE
+        concierge_on_user_speaking(); /* concierge-companion */
+#endif
         if (s_cb.on_user_started_speaking) {
             s_cb.on_user_started_speaking(s_cb.ctx);
         }
@@ -3184,6 +3305,9 @@ static void handle_json(const char *json, int len)
 
     } else if (strcmp(t, "AgentAudioDone") == 0) {
         ESP_LOGI(TAG, "agent finished speaking");
+#if CONFIG_CONCIERGE_ENABLE
+        concierge_on_agent_done(); /* concierge-companion */
+#endif
 #if CONFIG_DEEPGRAM_VOICE_UPDATE_IN_PLACE
         listen_due_send();
 #endif
@@ -3620,6 +3744,12 @@ static void keepalive_task(void *arg)
          */
         s_sending_ka = true;
         bool injected = false;
+#if CONFIG_CONCIERGE_ENABLE
+        /* concierge-companion: a desk answer outranks an inject; one send a wake. */
+        const bool answered = concierge_send_pending_answer();
+#else
+        const bool answered = false;
+#endif
         static char msg[NUDGE_MAX];   /* either slot's text; the nudge's is longer */
         /* On demand, and before the take: if PSRAM cannot spare it now, the
          * announcement stays queued for the next wake instead of being taken
@@ -3627,7 +3757,7 @@ static void keepalive_task(void *arg)
         if (inject == NULL && (announce_pending() || nudge_pending())) {
             inject = heap_caps_malloc(INJECT_LEN, MALLOC_CAP_SPIRAM);
         }
-        if (inject != NULL && s_ready && esp_websocket_client_is_connected(s_client) &&
+        if (!answered && inject != NULL && s_ready && esp_websocket_client_is_connected(s_client) &&
             announce_take(msg)) {
             /*
              * NOT GATED ON A QUIET UPLINK, unlike the KeepAlive below, and on
@@ -3647,8 +3777,8 @@ static void keepalive_task(void *arg)
                 esp_websocket_client_send_text(s_client, inject, (int)len, SEND_TIMEOUT);
                 injected = true;
             }
-        } else if (inject != NULL && s_ready && esp_websocket_client_is_connected(s_client) &&
-                   nudge_take(msg)) {
+        } else if (!answered && inject != NULL && s_ready &&
+                   esp_websocket_client_is_connected(s_client) && nudge_take(msg)) {
             /* The announcement's send, and its risk, for the user's side. Its
              * record is the same: the ConversationText echo. */
             const size_t len = build_inject(INJECT_USER_HEAD, msg, inject, INJECT_LEN);
@@ -3659,7 +3789,7 @@ static void keepalive_task(void *arg)
                 esp_websocket_client_send_text(s_client, inject, (int)len, SEND_TIMEOUT);
                 injected = true;
             }
-        } else if (!poked && s_ready && esp_websocket_client_is_connected(s_client)) {
+        } else if (!answered && !poked && s_ready && esp_websocket_client_is_connected(s_client)) {
             /*
              * WHEN this frame goes out matters more than whether it does, because it
              * is TEXT and transport_ws cannot drop it when the send queue is full --
@@ -3699,7 +3829,11 @@ static void keepalive_task(void *arg)
          * again for the other. Only after a send, which empties a slot, so this
          * cannot spin.
          */
-        if (injected && (announce_pending() || nudge_pending())) {
+        if ((injected || answered) && (announce_pending() || nudge_pending()
+#if CONFIG_CONCIERGE_ENABLE
+                                       || concierge_answer_pending()
+#endif
+                                       )) {
             xTaskNotifyGive(s_keepalive_task);
         }
         s_sending_ka = false;
@@ -3905,6 +4039,13 @@ esp_err_t dg_agent_init(const dg_agent_callbacks_t *callbacks)
         s_json = NULL;
         return ESP_FAIL;
     }
+#if CONFIG_CONCIERGE_ENABLE
+    /* concierge-companion: hold lines and recovery speak through these. */
+    const concierge_agent_hooks_t concierge_hooks = {
+        .say = dg_agent_announce, .nudge = dg_agent_nudge, .ready = dg_agent_is_ready,
+    };
+    concierge_tool_init(&concierge_hooks);
+#endif
     return ESP_OK;
 }
 

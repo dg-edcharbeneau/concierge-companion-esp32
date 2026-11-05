@@ -40,12 +40,35 @@ void concierge_tool_add_definition(cJSON *functions);
 bool concierge_tool_is(const char *name);
 
 /*
- * What the device says while the desk works, injected with behavior "queue"
- * (Deepgram's recommended filler for a pending function call). The model was
- * told to say one itself and on the bench never did: gpt-5.4-mini emits the
- * call with no text, leaving 5-7 s of silence. Under 64 bytes (ANNOUNCE_MAX).
+ * What the concierge layer needs from the agent client, registered once by
+ * dg_agent_init() so this component never includes main/. `say` and `nudge`
+ * must copy their text and be safe from any task (dg_agent_announce() and
+ * dg_agent_nudge() are).
  */
-#define CONCIERGE_HOLDING_LINE "One moment, let me check with the desk."
+typedef struct {
+    void (*say)(const char *text);   /* InjectAgentMessage, behavior "queue" */
+    void (*nudge)(const char *text); /* InjectUserMessage */
+    bool (*ready)(void);             /* a session is live */
+} concierge_agent_hooks_t;
+
+/*
+ * Creates the hold-line state, its one timer and its PSRAM buffer. Call once;
+ * later calls are ignored. Without it, ask_concierge still works, with no hold
+ * lines and no recovery.
+ */
+void concierge_tool_init(const concierge_agent_hooks_t *hooks);
+
+/*
+ * Conversation events for hold lines and recovery (concierge_hold.h), called
+ * from the agent client's event task.
+ */
+/* Any FunctionCallRequest entry, the device's own functions included. */
+void concierge_on_function_call(const char *name);
+/* Every ConversationText. Returns true when it is the echo of a line the
+ * device injected, which the caller keeps out of the replayed history. */
+bool concierge_on_text(const char *role, const char *content);
+void concierge_on_user_speaking(void);
+void concierge_on_agent_done(void);
 
 /*
  * Called once per answer, from the concierge worker task -- not the WebSocket

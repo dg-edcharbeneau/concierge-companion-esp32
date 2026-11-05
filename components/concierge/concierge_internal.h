@@ -17,10 +17,19 @@ typedef struct {
 /* NVS first, Kconfig seed second. False when any field is still empty. */
 bool concierge_store_load_guest(concierge_guest_t *out);
 
-/* Cached bearer from the last successful verification; false when none. */
-bool concierge_store_load_credential(char *out, size_t cap);
-void concierge_store_save_credential(const char *credential);
-void concierge_store_clear_credential(void);
+/*
+ * What a desk turn needs, loaded from NVS ONCE at init and then only touched by
+ * the concierge worker. The worker's stack is in PSRAM, and a PSRAM-stack task
+ * must not do flash operations (NVS reads and writes included), so nothing on
+ * the turn path reads or writes NVS. The portal saves settings and reboots, so
+ * a load at boot is never stale. The credential lives in RAM only: a reboot
+ * costs one extra POST /sessions on the first question.
+ */
+typedef struct {
+    concierge_guest_t guest;
+    bool configured;
+    char credential[CONCIERGE_CREDENTIAL_LEN]; /* "" until verified */
+} concierge_session_t;
 
 typedef enum {
     CONCIERGE_OK = 0,
@@ -39,4 +48,5 @@ typedef enum {
  * reused on that retry so the stay workflow joins rather than duplicates it.
  * On CONCIERGE_OK, *answer is heap-allocated and owned by the caller.
  */
-concierge_status_t concierge_client_ask(const char *turn_id, const char *text, char **answer);
+concierge_status_t concierge_client_ask(concierge_session_t *session, const char *turn_id,
+                                        const char *text, char **answer);
